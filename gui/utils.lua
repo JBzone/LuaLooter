@@ -6,7 +6,7 @@ WHY: Reusable UI components
 --]]
 
 local mq = require('mq')
-local ImGui = require('ImGui')
+local ImGui = require 'ImGui'
 
 local GUIUtils = {}
 

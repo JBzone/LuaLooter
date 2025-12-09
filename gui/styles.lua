@@ -6,7 +6,7 @@ WHY: Consistent look and feel
 --]]
 
 local mq = require('mq')
-local ImGui = require('ImGui')
+local ImGui = require 'ImGui'
 
 local Styles = {}
 

@@ -16,7 +16,7 @@ function Config.new(logger)
         
         -- Default settings structure
       settings = {
-        alpha_mode = true,
+        alpha_mode = false,
         loot_check_delay = 2000,
         debug_logging = false,
         auto_open_window = true,

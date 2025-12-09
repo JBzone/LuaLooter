@@ -183,12 +183,28 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
         self.state:set_processing(false)
     end
     
+    local function is_master_looter()
+      -- 1. Check if we're in a group and are its master looter
+      if mq.TLO.Group and mq.TLO.Group.MasterLooter.ID() == mq.TLO.Me.ID() then
+        return true
+      end
+      -- 2. Check if we're in a raid and are its master looter
+      if mq.TLO.Raid and mq.TLO.Raid.MasterLooter.ID() == mq.TLO.Me.ID() then
+        return true
+      end
+      -- 3. Default: If we're not in a group AND not in a raid, we are the solo master looter.
+      if not mq.TLO.Group and not mq.TLO.Raid then
+        return true
+      end
+      -- 4. Otherwise, we are in a group/raid but are NOT the master looter.
+      return false
+    end
+
     -- OPTIMIZED: Process items with caching and session tracking
     function self:process_items_optimized(filter_actions)
         -- Process shared loot
         local shared_count = mq.TLO.AdvLoot.SCount()
-        local is_master = mq.TLO.Group.MasterLooter.Name() == mq.TLO.Me.Name() or 
-                         (mq.TLO.Raid.MasterLooter.ID() > 0 and mq.TLO.Raid.MasterLooter.Name() == mq.TLO.Me.Name())
+        local is_master = is_master_looter()
         
         if shared_count > 0 and is_master and self.config.char_settings.MasterLoot then
             self.logger:debug("Processing %d shared items in session %s", 

@@ -6,7 +6,7 @@ WHY: Consistent window behavior and styling
 --]]
 
 local mq = require('mq')
-local ImGui = require('ImGui')
+local ImGui = require 'ImGui'
 
 local BaseWindow = {}
 
@@ -17,7 +17,7 @@ function BaseWindow.new(title, state, config, logger)
         config = config,
         logger = logger,
         open = true,
-        flags = ImGui.WindowFlags.None,
+        flags = 0,
         position = {x = 100, y = 100},
         size = {width = 800, height = 600},
         first_render = true
@@ -26,8 +26,8 @@ function BaseWindow.new(title, state, config, logger)
     function self:begin_window()
         -- Set window position/size on first render
         if self.first_render then
-            ImGui.SetNextWindowPos(self.position.x, self.position.y, ImGui.Cond.FirstUseEver)
-            ImGui.SetNextWindowSize(self.size.width, self.size.height, ImGui.Cond.FirstUseEver)
+            ImGui.SetNextWindowPos(self.position.x, self.position.y, ImGuiCond_FirstUseEver)
+            ImGui.SetNextWindowSize(self.size.width, self.size.height, ImGuiCond_FirstUseEver)
             self.first_render = false
         end
         

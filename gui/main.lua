@@ -6,8 +6,8 @@ WHY: Central hub for all GUI functionality
 --]]
 
 local mq = require('mq')
-local ImGui = require('ImGui')
-local BaseWindow = require('gui.window')
+local ImGui = require 'ImGui'
+local BaseWindow = require 'gui.window'
 
 local MainWindow = {}
 
@@ -31,7 +31,7 @@ function MainWindow.new(state, config, logger)
     
     -- Window settings
     self:set_size(900, 700)
-    self:add_flag(ImGui.WindowFlags.MenuBar)
+    self:add_flag(ImGuiWindowFlags_MenuBar)
     
     function self:render_content()
         -- Menu bar
@@ -74,27 +74,31 @@ function MainWindow.new(state, config, logger)
             
             -- Status indicator
             ImGui.SameLine(ImGui.GetWindowWidth() - 150)
-            local status_color = self.state:is_enabled() and "\ag" or "\ar"
-            ImGui.TextColored(1.0, 0.5, 0.0, 1.0, string.format("%s%s", status_color, self.state:is_enabled() and "ACTIVE" or "PAUSED"))
+            
+            local status_text = self.state:is_enabled() and "ACTIVE" or "PAUSED"
+            local r, g, b
+            if self.state:is_enabled() then
+                r, g, b = 0.0, 1.0, 0.0  -- Green
+            else
+                r, g, b = 1.0, 0.0, 0.0  -- Red
+            end
+            ImGui.TextColored(r, g, b, 1.0, status_text)
             
             ImGui.EndMenuBar()
         end
         
-        -- Tab bar
-        if ImGui.BeginTabBar("MainTabs", ImGui.TabBarFlags.None) then
+        -- Tab bar with SAFE selected tab highlighting
+        if ImGui.BeginTabBar("MainTabs") then
             for _, tab in ipairs(self.tabs) do
-                local tab_flags = ImGui.TabItemFlags.None
-                if self.active_tab == tab.id then
-                    tab_flags = bit32.bor(tab_flags, ImGui.TabItemFlags.SetSelected)
+                -- SAFE Tweak: Check if the global flag exists, otherwise use 0.
+                local tab_flags = 0
+                if self.active_tab == tab.id and ImGuiTabItemFlags_SetSelected then
+                    tab_flags = ImGuiTabItemFlags_SetSelected
                 end
                 
-                local tab_open = true
-                if ImGui.BeginTabItem(string.format("%s %s", tab.icon, tab.name), tab_open, tab_flags) then
+                if ImGui.BeginTabItem(tab.icon .. " " .. tab.name, nil, tab_flags) then
                     self.active_tab = tab.id
-                    
-                    -- Render the active panel
                     self:render_panel(tab.id)
-                    
                     ImGui.EndTabItem()
                 end
             end
