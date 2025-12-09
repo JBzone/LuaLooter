@@ -24,24 +24,25 @@ function Main.new()
     
     function self:init()
         self.logger:info("Initializing LuaLooter v0.5.0 (Alpha)")
-    
+        
         -- Load configuration
         self.config:load()
-    
-        -- Setup file logging if enabled
-        if self.config:get('enable_file_logging') then
-          local log_path = self.config:get('log_file_path') or (mq.configDir .. "\\LuaLooter.log")
-          self.logger:set_log_file(log_path)
-        end
-    
-        -- Log startup info
-        self.logger:log_startup()
         
         -- Initialize services (business logic)
         self.services.ini = require('services.iniservice').new(self.config, self.logger)
         self.services.items = require('services.itemservice').new(self.config, self.logger, self.services.ini)
         self.services.profit = require('services.profitservice').new(self.state, self.config, self.logger, self.events)
         self.services.loot = require('services.lootservice').new(self.state, self.config, self.logger, self.events, self.services.items)
+        
+        -- Initialize GUI Manager (NEW) - add to services
+        local success, gui = pcall(require, 'gui.manager')
+        if success then
+            self.services.gui = gui.new(self.state, self.config, self.logger)
+            self.logger:debug("GUI Manager initialized")
+        else
+            self.logger:warn("GUI not available: %s", gui)
+            self.services.gui = nil
+        end
         
         -- Initialize modules (features)
         self.modules.filters = require('modules.filters').new(self.state, self.config, self.logger, self.events, self.services.items)
@@ -60,6 +61,9 @@ function Main.new()
         
         self.logger:info("LuaLooter initialized successfully")
         self.logger:info("Mode: " .. (self.config.settings.alpha_mode and "ALPHA (log only)" or "PRODUCTION (looting active)"))
+        if self.services.gui then
+            self.logger:info("GUI: Available (use /ll gui)")
+        end
     end
     
     function self:register_events()
@@ -79,14 +83,18 @@ function Main.new()
         -- Detect loot window close
         mq.event('LootWindowClosed', '#*#Loot #window# has been closed#*#', function()
             self.state:clear_processed_items()
-            self.modules.logic:clear_waiting_items()
+            if self.modules.logic then
+                self.modules.logic:clear_waiting_items()
+            end
             self.logger:debug("Loot window closed, cleared processed and waiting items")
         end)
         
         -- Detect zoning (window closes on zone)
         mq.event('BeginZone', '#*#LOADING, PLEASE WAIT...#*#', function()
             self.state:clear_processed_items()
-            self.modules.logic:clear_waiting_items()
+            if self.modules.logic then
+                self.modules.logic:clear_waiting_items()
+            end
             self.logger:debug("Zoning, cleared processed and waiting items")
         end)
     end
@@ -98,6 +106,11 @@ function Main.new()
         
         -- Update state
         self.state.last_check = os.time()
+        
+        -- Render GUI if visible (NEW)
+        if self.services.gui then
+            self.services.gui:render()
+        end
         
         -- Check for loot
         local has_loot = mq.TLO.AdvLoot.SCount() > 0 or mq.TLO.AdvLoot.PCount() > 0
@@ -119,11 +132,6 @@ function Main.new()
         
         self.logger:info("Entering main loop")
         while self.running do
-            -- Check log rotation every minute
-            if os.time() % 60 == 0 and self.config:get('enable_file_logging') then
-              self.logger:rotate_log(self.config:get('max_log_size_mb'))
-            end
-
             self:process()
             mq.doevents()
             mq.delay(100) -- 10 FPS
@@ -133,18 +141,20 @@ function Main.new()
     function self:shutdown()
         self.logger:info("Shutting down LuaLooter")
         self.running = false
-    
-        -- Shutdown logger (closes file)
-        self.logger:shutdown()
-    
+        
+        -- Shutdown GUI if available
+        if self.services.gui then
+            self.services.gui:shutdown()
+        end
+        
         -- Unbind commands
         mq.unbind("/looter")
         mq.unbind("/ll")
-    
+        
         -- Save settings
         self.config:save()
-    
-        print("\aw[LuaLooter] Shutdown complete\ax")
+        
+        self.logger:info("Shutdown complete")
     end
     
     return self
