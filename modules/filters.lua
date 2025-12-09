@@ -97,55 +97,63 @@ function Filters.new(state, config, logger, events, item_service)
         return false, nil, 0
     end
     
-    function self:filter_to_action(filter_type, item_info, item_name)
-        self.logger:debug("Filter %s active for %s", filter_type, item_name)
-        
-        if filter_type == "AlwaysNeed" or filter_type == "Need" then
-            -- Check Lore for Need filters
-            if item_info and item_info.lore then
-                local existing_count = self.items.inventory:get_item_count(item_name)
-                if existing_count > 0 then
-                    self.logger:info("Lore item %s already in inventory, ignoring despite Need filter", item_name)
-                    return "IGNORE"
-                end
-            end
-            return "KEEP"
+  function self:filter_to_action(filter_type, item_info, item_name)
+    self.logger:debug("Filter %s active for %s", filter_type, item_name)
+    
+    -- Helper function to check INI for pass rules (ELIMINATES DUPLICATION)
+    local function check_ini_for_pass_rule()
+        local ini_config = self.items:get_ini_config(item_name)
+        if ini_config and ini_config.personal then
+            local parsed = self.items.ini:parse_ini_rule(ini_config.personal)
             
-        elseif filter_type == "AlwaysGreed" or filter_type == "Greed" then
-            -- Greed items with sufficient value
-            if item_info.value and item_info.value >= 1000 then
-                return "KEEP"
-            else
-                return "IGNORE"
-            end
-            
-        elseif filter_type == "Never" or filter_type == "No" then
-            -- ALWAYS check for pass rules in INI first
-            local ini_config = self.items:get_ini_config(item_name)
-            if ini_config and ini_config.personal then
-                local parsed = self.items.ini:parse_ini_rule(ini_config.personal)
-                
-                if parsed.action and string.lower(parsed.action) == "pass" and parsed.player_name then
-                    self.logger:debug("Never/No filter with pass rule found for %s, passing to %s", 
-                                    item_name, parsed.player_name)
-                    return "PASS|" .. parsed.player_name
-                end
-            end
-            
-            -- No pass rule found in INI
-            if item_info and item_info.no_drop then
-                -- No-drop item with Never/No filter and no pass rule = wait 5 minutes
-                self.logger:debug("Never/No filter on no-drop item %s with no pass rule, waiting 5 minutes", item_name)
-                return "LEAVE"  -- Leave in window for 5 minutes
-            else
-                -- Non-no-drop item with Never/No filter and no pass rule = ignore immediately
-                self.logger:debug("Never/No filter on non-no-drop item %s with no pass rule, ignoring", item_name)
-                return "IGNORE"  -- Execute /advloot never immediately
+            if parsed.action and string.lower(parsed.action) == "pass" and parsed.player_name then
+                return "PASS|" .. parsed.player_name
             end
         end
-        
         return nil
     end
+    
+    if filter_type == "AlwaysNeed" or filter_type == "Need" then
+        -- Check Lore for Need filters
+        if item_info and item_info.lore then
+            local existing_count = self.items.inventory:get_item_count(item_name)
+            if existing_count > 0 then
+                self.logger:info("Lore item %s already in inventory, ignoring despite Need filter", item_name)
+                return "IGNORE"
+            end
+        end
+        return "KEEP"
+        
+    elseif filter_type == "AlwaysGreed" or filter_type == "Greed" then
+        -- Greed items with sufficient value
+        if item_info.value and item_info.value >= 1000 then
+            return "KEEP"
+        else
+            return "IGNORE"
+        end
+        
+    elseif filter_type == "Never" or filter_type == "No" then
+        -- SINGLE call to check INI for pass rules (no duplication)
+        local pass_rule = check_ini_for_pass_rule()
+        if pass_rule then
+            self.logger:debug("Never/No filter with pass rule found for %s", item_name)
+            return pass_rule
+        end
+        
+        -- No pass rule found in INI
+        if item_info and item_info.no_drop then
+            -- No-drop item with Never/No filter and no pass rule = wait 5 minutes
+            self.logger:debug("Never/No filter on no-drop item %s with no pass rule, waiting 5 minutes", item_name)
+            return "LEAVE"  -- Leave in window for 5 minutes
+        else
+            -- Non-no-drop item with Never/No filter and no pass rule = ignore immediately
+            self.logger:debug("Never/No filter on non-no-drop item %s with no pass rule, ignoring", item_name)
+            return "IGNORE"  -- Execute /advloot never immediately
+        end
+    end
+    
+    return nil
+  end
     
     function self:process()
         local filter_actions = {}

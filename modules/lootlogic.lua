@@ -18,10 +18,121 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
         items = item_service,
         filters = filter_module,
         
+        -- Track processed items PER LOOT WINDOW SESSION
+        current_session_id = nil,
+        processed_items = {},  -- item_name -> {session_id, processed_at, action}
+        
+        -- Cache for item decisions to avoid recalculation
+        decision_cache = {},  -- cache_key -> {action, expires_at}
+        
         -- Store items that are waiting due to no-drop items with no rules
-        waiting_items = {}
+        waiting_items = {},
+        
+        -- Performance tracking
+        stats = {
+            cache_hits = 0,
+            cache_misses = 0,
+            items_processed = 0,
+            session_items = 0
+        }
     }
     
+    -- Generate a unique session ID for current loot window
+    function self:generate_session_id()
+        local npc_id = mq.TLO.Target.ID() or 0
+        local timestamp = os.time()
+        return string.format("session_%d_%d", npc_id, timestamp)
+    end
+    
+    -- Get cache key for an item decision
+    function self:get_cache_key(item_name, is_shared, filter_actions)
+        local session_id = self.current_session_id or "no_session"
+        local filter_key = "no_filter"
+        
+        if filter_actions and filter_actions[item_name] then
+            local action = filter_actions[item_name].action
+            filter_key = action:gsub("[^%w]", "_")
+        end
+        
+        return string.format("%s_%s_%s_%s", 
+            session_id, item_name, is_shared and "shared" or "personal", filter_key)
+    end
+    
+    -- Check if item was already processed in current session
+    function self:is_item_processed(item_name)
+        if not self.current_session_id then return false end
+        
+        local processed = self.processed_items[item_name]
+        if not processed then return false end
+        
+        -- Check if it's from current session (not an old one)
+        return processed.session_id == self.current_session_id
+    end
+    
+    -- Mark item as processed in current session
+    function self:mark_item_processed(item_name, action)
+        if not self.current_session_id then
+            self.current_session_id = self:generate_session_id()
+        end
+        
+        self.processed_items[item_name] = {
+            session_id = self.current_session_id,
+            processed_at = os.time(),
+            action = action
+        }
+        
+        self.stats.session_items = self.stats.session_items + 1
+        
+        -- Clean up old entries (keep last 100 items max)
+        self:cleanup_old_entries()
+    end
+    
+    -- Clean up old processed items to prevent memory bloat
+    function self:cleanup_old_entries()
+        if #self.processed_items > 100 then
+            local count = 0
+            local current_time = os.time()
+            local max_age = 3600  -- 1 hour
+            
+            for item_name, data in pairs(self.processed_items) do
+                if current_time - data.processed_at > max_age then
+                    self.processed_items[item_name] = nil
+                    count = count + 1
+                end
+            end
+            
+            if count > 0 then
+                self.logger:debug("Cleaned up %d old processed items", count)
+            end
+        end
+    end
+    
+    -- Clear all processed items (call when loot window closes)
+    function self:clear_processed_items()
+        self.processed_items = {}
+        self.decision_cache = {}
+        self.current_session_id = nil
+        self.stats.session_items = 0
+        self.logger:debug("Cleared all processed items and cache")
+    end
+    
+    -- Get performance statistics
+    function self:get_performance_stats()
+        local total = self.stats.cache_hits + self.stats.cache_misses
+        local hit_rate = total > 0 and (self.stats.cache_hits / total * 100) or 0
+        
+        return {
+            cache_hits = self.stats.cache_hits,
+            cache_misses = self.stats.cache_misses,
+            hit_rate = hit_rate,
+            items_processed = self.stats.items_processed,
+            current_session = self.current_session_id,
+            processed_count = #self.processed_items,
+            session_items = self.stats.session_items
+        }
+    end
+    
+    -- Main processing function with performance improvements
     function self:process(filter_actions)
         if not self.state:is_enabled() or self.state:is_processing() then
             return
@@ -32,6 +143,12 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
         local has_loot = mq.TLO.AdvLoot.SCount() > 0 or mq.TLO.AdvLoot.PCount() > 0
         
         if has_loot then
+            -- Generate new session ID if this is first loot detection
+            if not self.current_session_id then
+                self.current_session_id = self:generate_session_id()
+                self.logger:debug("New loot session started: %s", self.current_session_id)
+            end
+            
             self.events:publish(self.events.EVENT_TYPES.LOOT_START, {})
             
             -- Open window if needed
@@ -46,59 +163,62 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
             -- Check for expired waiting periods
             self:check_waiting_items()
             
-            -- Process items with filter overrides
-            self:process_items(filter_actions)
+            -- Process items with filter overrides (OPTIMIZED)
+            self:process_items_optimized(filter_actions)
             
             self.events:publish(self.events.EVENT_TYPES.LOOT_COMPLETE, {})
+        else
+            -- No loot detected, clear session
+            if self.current_session_id then
+                self.logger:debug("Loot window empty, session %s ended", self.current_session_id)
+                self:clear_processed_items()
+            end
+        end
+        
+        -- Log performance stats occasionally
+        if os.time() % 30 == 0 then  -- Every 30 seconds
+            self:log_performance_stats()
         end
         
         self.state:set_processing(false)
     end
     
-    function self:process_items(filter_actions)
+    -- OPTIMIZED: Process items with caching and session tracking
+    function self:process_items_optimized(filter_actions)
         -- Process shared loot
         local shared_count = mq.TLO.AdvLoot.SCount()
         local is_master = mq.TLO.Group.MasterLooter.Name() == mq.TLO.Me.Name() or 
                          (mq.TLO.Raid.MasterLooter.ID() > 0 and mq.TLO.Raid.MasterLooter.Name() == mq.TLO.Me.Name())
         
         if shared_count > 0 and is_master and self.config.char_settings.MasterLoot then
-            -- Only log if we actually have items to process
-            local items_to_process = 0
-            for i = 1, shared_count do
-                local item = mq.TLO.AdvLoot.SList(i)
-                if item() then
-                    local name = item.Name()
-                    if not self.state:is_item_processed(name) then
-                        items_to_process = items_to_process + 1
-                    end
-                end
-            end
-            
-            if items_to_process > 0 then
-                self.logger:info("Processing %d shared items as Master Looter", items_to_process)
-            end
+            self.logger:debug("Processing %d shared items in session %s", 
+                shared_count, self.current_session_id)
             
             for i = shared_count, 1, -1 do
                 local item = mq.TLO.AdvLoot.SList(i)
                 if item() then
                     local name = item.Name()
                     
-                    -- SKIP if already processed this session
-                    if self.state:is_item_processed(name) then
-                        self.logger:debug("Already processed %s, skipping", name)
+                    -- PERFORMANCE OPTIMIZATION: Skip if already processed this session
+                    if self:is_item_processed(name) then
+                        self.logger:debug("Skipping already processed item: %s", name)
                         goto continue
                     end
                     
-                    local action = self:get_action_for_item(name, i, true, filter_actions)
+                    -- Check no-drop timer
+                    local wait_elapsed = self.state:get_no_drop_wait_time(name, 
+                        self.config.settings.no_drop_wait_time or 300)
+                    
+                    if wait_elapsed and wait_elapsed < (self.config.settings.no_drop_wait_time or 300) then
+                        self.logger:debug("No-drop item %s in wait period, skipping", name)
+                        self:mark_item_processed(name, "WAIT")
+                        goto continue
+                    end
+                    
+                    -- Get action with caching
+                    local action = self:get_cached_action(name, i, true, filter_actions)
                     
                     if action and action ~= "ASK" then
-                        -- Check if this item is waiting (no-drop with no rules)
-                        if self:is_item_waiting(name) then
-                            self.logger:info("Item %s is in waiting period, leaving in window", name)
-                            self.state:mark_item_processed(name)  -- Mark as processed
-                            goto continue
-                        end
-                        
                         -- Execute with delay between items
                         if i < shared_count then
                             mq.delay(100)
@@ -106,62 +226,58 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
                         
                         local executed = self:execute_action(i, action, name, true)
                         if executed then
-                            self.state:mark_item_processed(name)  -- Mark as processed
+                            self:mark_item_processed(name, action)
                         end
+                    else
+                        -- Mark as processed even if no action (e.g., ASK)
+                        self:mark_item_processed(name, action or "NO_ACTION")
                     end
                     ::continue::
                 end
             end
         end
         
-        -- Process personal loot
+        -- Process personal loot (similar optimization)
         local personal_count = mq.TLO.AdvLoot.PCount()
         if personal_count > 0 then
-            -- Count items to process
-            local items_to_process = 0
-            for i = 1, personal_count do
-                local item = mq.TLO.AdvLoot.PList(i)
-                if item() then
-                    local name = item.Name()
-                    if not self.state:is_item_processed(name) then
-                        items_to_process = items_to_process + 1
-                    end
-                end
-            end
-            
-            if items_to_process > 0 then
-                self.logger:info("Processing %d personal loot items", items_to_process)
-            end
+            self.logger:debug("Processing %d personal items in session %s", 
+                personal_count, self.current_session_id)
             
             for i = personal_count, 1, -1 do
                 local item = mq.TLO.AdvLoot.PList(i)
                 if item() then
                     local name = item.Name()
                     
-                    -- SKIP if already processed this session
-                    if self.state:is_item_processed(name) then
-                        self.logger:debug("Already processed %s, skipping", name)
+                    -- PERFORMANCE OPTIMIZATION: Skip if already processed
+                    if self:is_item_processed(name) then
+                        self.logger:debug("Skipping already processed item: %s", name)
                         goto personal_continue
                     end
                     
-                    local action = self:get_action_for_item(name, i, false, filter_actions)
+                    -- Check no-drop timer
+                    local wait_elapsed = self.state:get_no_drop_wait_time(name, 
+                        self.config.settings.no_drop_wait_time or 300)
+                    
+                    if wait_elapsed and wait_elapsed < (self.config.settings.no_drop_wait_time or 300) then
+                        self.logger:debug("No-drop item %s in wait period, skipping", name)
+                        self:mark_item_processed(name, "WAIT")
+                        goto personal_continue
+                    end
+                    
+                    -- Get action with caching
+                    local action = self:get_cached_action(name, i, false, filter_actions)
                     
                     if action and action ~= "ASK" then
-                        -- Check if this item is waiting (no-drop with no rules)
-                        if self:is_item_waiting(name) then
-                            self.logger:info("Item %s is in waiting period, leaving in window", name)
-                            self.state:mark_item_processed(name)  -- Mark as processed
-                            goto personal_continue
-                        end
-                        
                         if i < personal_count then
                             mq.delay(100)
                         end
                         
                         local executed = self:execute_action(i, action, name, false)
                         if executed then
-                            self.state:mark_item_processed(name)  -- Mark as processed
+                            self:mark_item_processed(name, action)
                         end
+                    else
+                        self:mark_item_processed(name, action or "NO_ACTION")
                     end
                     ::personal_continue::
                 end
@@ -169,6 +285,57 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
         end
     end
     
+    -- Get action with caching layer
+    function self:get_cached_action(name, index, is_shared, filter_actions)
+        local cache_key = self:get_cache_key(name, is_shared, filter_actions)
+        local now = os.time()
+        
+        -- Check cache first
+        if self.decision_cache[cache_key] then
+            local cached = self.decision_cache[cache_key]
+            if cached.expires_at > now then
+                self.stats.cache_hits = self.stats.cache_hits + 1
+                self.logger:debug("Cache hit for %s: %s", name, cached.action)
+                return cached.action
+            else
+                -- Cache expired
+                self.decision_cache[cache_key] = nil
+            end
+        end
+        
+        -- Cache miss, calculate action
+        self.stats.cache_misses = self.stats.cache_misses + 1
+        local action = self:get_action_for_item(name, index, is_shared, filter_actions)
+        
+        -- Cache the decision (valid for 30 seconds)
+        if action then
+            self.decision_cache[cache_key] = {
+                action = action,
+                expires_at = now + 30
+            }
+        end
+        
+        return action
+    end
+    
+    -- Clear decision cache
+    function self:clear_decision_cache()
+        self.decision_cache = {}
+        self.logger:debug("Decision cache cleared")
+    end
+    
+    -- Log performance statistics
+    function self:log_performance_stats()
+        local total = self.stats.cache_hits + self.stats.cache_misses
+        local hit_rate = total > 0 and (self.stats.cache_hits / total * 100) or 0
+        
+        self.logger:debug("Performance: Cache hits=%d, misses=%d, rate=%.1f%%", 
+            self.stats.cache_hits, self.stats.cache_misses, hit_rate)
+        self.logger:debug("Session %s: %d items processed", 
+            self.current_session_id or "none", self.stats.session_items)
+    end
+    
+    -- Get action for item (ORIGINAL LOGIC WITH MINIMAL CHANGES)
     function self:get_action_for_item(name, index, is_shared, filter_actions)
         -- Get item info first
         local item_info = self.items:get_item_info(name)
@@ -405,139 +572,123 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     end
     
     function self:execute_action(index, action, name, is_shared)
-    -- Parse action string (could be "PASS|Playername")
-    local action_parts = {}
-    for part in string.gmatch(action, "[^|]+") do
-        table.insert(action_parts, part)
-    end
-    
-    local base_action = action_parts[1]
-    local target_player = action_parts[2]
-    
-    -- Get item info for profit tracking
-    local item_info = self.items:get_item_info(name)
-    
-    -- Track profit for KEEP and PASS actions
-    local should_track_profit = false
-    if base_action == "KEEP" or base_action == "PASS" then
-        should_track_profit = true
-    end
-    
-    -- Track profit if applicable
-    if should_track_profit and item_info and item_info.value and item_info.value > 0 then
-        self.stats.value_looted = self.stats.value_looted + item_info.value
-        self.stats.items_looted = self.stats.items_looted + 1
-        self.logger:info("Profit: %s (+%s)", name, self:format_money(item_info.value))
-    end
-    
-    -- Check if we're already processing - wait if we are
-    if self.state:is_processing() then
-        self.logger:debug("Waiting for previous loot to complete...")
-        mq.delay(500)
-    end
-    
-    -- Set processing flag
-    self.state:set_processing(true)
-    
-    -- Create a unique key using NPC ID + Item Name + Timestamp
-    local npc_id = mq.TLO.Target.ID() or 0
-    local item_key = string.format("%d_%s_%d", npc_id, name, os.time())
-    
-    -- Check if we should attempt this loot (prevent spam)
-    local now = os.time()
-    local attempts = self.state.loot_attempts[item_key] or {count = 0, last_attempt = 0}
-    
-    -- Reset counter if it's been more than 10 seconds
-    if now - attempts.last_attempt > 10 then
-        attempts.count = 0
-    end
-    
-    attempts.count = attempts.count + 1
-    attempts.last_attempt = now
-    
-    -- Save back to state
-    self.state.loot_attempts[item_key] = attempts
-    
-    -- If we've tried this item 3 times in 10 seconds, skip it
-    if attempts.count > 3 then
-        self.logger:warn("Skipping %s - too many attempts (NPC: %d)", name, npc_id)
-        self.state:set_processing(false)
-        return false
-    end
-    
-    -- Execute the command
-    local command = nil
-    if base_action == "KEEP" then
-        if is_shared then
-            command = string.format('/advloot shared %d giveto %s', index, mq.TLO.Me.Name())
-        else
-            command = string.format('/advloot personal %d loot', index)
-        end
-        self.logger:info("KEEPING %s (shared: %s, NPC: %d)", name, tostring(is_shared), npc_id)
-        
-    elseif base_action == "IGNORE" then
-        if is_shared then
-            command = string.format('/advloot shared %d leave', index)
-        else
-            command = string.format('/advloot personal %d never', index)
-        end
-        self.logger:info("IGNORING %s (shared: %s, NPC: %d)", name, tostring(is_shared), npc_id)
-        
-    elseif base_action == "PASS" and target_player then
-        if is_shared then
-            command = string.format('/advloot shared %d giveto %s', index, target_player)
-            self.logger:info("PASSING %s to %s (NPC: %d)", name, target_player, npc_id)
-        else
-            -- Can't pass personal loot
-            self.logger:warn("Cannot pass personal loot item: %s, keeping instead (NPC: %d)", name, npc_id)
-            command = string.format('/advloot personal %d loot', index)
+        -- Parse action string (could be "PASS|Playername")
+        local action_parts = {}
+        for part in string.gmatch(action, "[^|]+") do
+            table.insert(action_parts, part)
         end
         
-    elseif base_action == "LEAVE" then
-        -- For "LEAVE" action on no-drop items, DO NOT issue any command
-        if is_shared then
-            self.logger:info("LEAVING %s in loot window (no-drop item, NPC: %d, will expire in 5 min)", name, npc_id)
+        local base_action = action_parts[1]
+        local target_player = action_parts[2]
+        
+        -- Check if we're already processing - wait a bit if we are
+        if self.state:is_processing() then
+            self.logger:debug("Waiting for previous loot to complete...")
+            mq.delay(500)
+        end
+        
+        -- Set processing flag
+        self.state:set_processing(true)
+        
+        -- Create a unique key for this loot attempt
+        local npc_id = mq.TLO.Target.ID() or 0
+        local item_key = string.format("%d_%s_%d", npc_id, name, os.time())
+        
+        -- Check if we should attempt this loot (prevent spam)
+        local now = os.time()
+        local attempts = self.state.loot_attempts[item_key] or {count = 0, last_attempt = 0}
+        
+        -- Reset counter if it's been more than 10 seconds
+        if now - attempts.last_attempt > 10 then
+            attempts.count = 0
+        end
+        
+        attempts.count = attempts.count + 1
+        attempts.last_attempt = now
+        
+        -- Save back to state
+        self.state.loot_attempts[item_key] = attempts
+        
+        -- If we've tried this item 3 times in 10 seconds, skip it
+        if attempts.count > 3 then
+            self.logger:warn("Skipping %s - too many attempts (NPC: %d)", name, npc_id)
             self.state:set_processing(false)
-            return true  -- No command, item stays in window
-        else
-            self.logger:info("LEAVING %s in window (personal, no-drop waiting period, NPC: %d)", name, npc_id)
-            self.state:set_processing(false)
-            return true  -- No command executed
+            return false
         end
         
-    else
-        self.logger:warn("Unknown action: %s for %s, ignoring (NPC: %d)", action, name, npc_id)
-        if is_shared then
-            command = string.format('/advloot shared %d leave', index)
+        -- Execute the command
+        local command = nil
+        if base_action == "KEEP" then
+            if is_shared then
+                command = string.format('/advloot shared %d giveto %s', index, mq.TLO.Me.Name())
+            else
+                command = string.format('/advloot personal %d loot', index)
+            end
+            self.logger:info("KEEPING %s (shared: %s, NPC: %d)", name, tostring(is_shared), npc_id)
+            
+        elseif base_action == "IGNORE" then
+            if is_shared then
+                command = string.format('/advloot shared %d leave', index)
+            else
+                command = string.format('/advloot personal %d never', index)
+            end
+            self.logger:info("IGNORING %s (shared: %s, NPC: %d)", name, tostring(is_shared), npc_id)
+            
+        elseif base_action == "PASS" and target_player then
+            if is_shared then
+                command = string.format('/advloot shared %d giveto %s', index, target_player)
+                self.logger:info("PASSING %s to %s (NPC: %d)", name, target_player, npc_id)
+            else
+                -- Can't pass personal loot
+                self.logger:warn("Cannot pass personal loot item: %s, keeping instead (NPC: %d)", name, npc_id)
+                command = string.format('/advloot personal %d loot', index)
+            end
+            
+        elseif base_action == "LEAVE" then
+            -- For "LEAVE" action on no-drop items, DO NOT issue any command
+            if is_shared then
+                self.logger:info("LEAVING %s in loot window (no-drop item, NPC: %d, will expire in 5 min)", name, npc_id)
+                self.state:set_processing(false)
+                return true  -- No command, item stays in window
+            else
+                self.logger:info("LEAVING %s in window (personal, no-drop waiting period, NPC: %d)", name, npc_id)
+                self.state:set_processing(false)
+                return true  -- No command executed
+            end
+            
         else
-            command = string.format('/advloot personal %d never', index)
+            self.logger:warn("Unknown action: %s for %s, ignoring (NPC: %d)", action, name, npc_id)
+            if is_shared then
+                command = string.format('/advloot shared %d leave', index)
+            else
+                command = string.format('/advloot personal %d never', index)
+            end
         end
-    end
-    
-    if command then
-        -- In alpha mode, just log
-        if self.config.settings.alpha_mode then
-            self.logger:info("[ALPHA] Would execute: %s", command)
+        
+        if command then
+            -- In alpha mode, just log
+            if self.config.settings.alpha_mode then
+                self.logger:info("[ALPHA] Would execute: %s", command)
+                self.state:set_processing(false)
+                return true
+            end
+            
+            -- Production mode - actually execute (with proper delay)
+            self.logger:debug("Executing command: %s", command)
+            mq.cmd(command)
+            mq.delay(500)  -- CRITICAL: 500ms delay for command to process
+            
+            -- Clear processing flag
             self.state:set_processing(false)
+            
+            self.logger:info("Looted: %s (%s, NPC: %d)", name, action, npc_id)
             return true
         end
         
-        -- Production mode - actually execute (with proper delay)
-        self.logger:debug("Executing command: %s", command)
-        mq.cmd(command)
-        mq.delay(500)  -- CRITICAL: 500ms delay for command to process
-        
-        -- Clear processing flag
+        -- Clear processing flag if we didn't execute a command
         self.state:set_processing(false)
-        
-        self.logger:info("Looted: %s (%s, NPC: %d)", name, action, npc_id)
-        return true
+        return false
     end
-    
-    -- Clear processing flag if we didn't execute a command
-    self.state:set_processing(false)
-    return false
-  end
     
     function self:start_waiting_period(item_name, reason)
         if not self.waiting_items[item_name] then

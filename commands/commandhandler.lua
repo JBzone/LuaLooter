@@ -52,6 +52,7 @@ function CommandHandler.new(state, config, logger, events, services)
             debug = {fn = self.cmd_debug, help = "Show debug information"},
             resetstats = {fn = self.cmd_resetstats, help = "Reset profit statistics"},
             gui = {fn = self.cmd_gui, help = "Toggle GUI window (gui show/hide)"},
+            perf = {fn = self.cmd_perf, help = "Show performance statistics"},
             pause = {fn = self.cmd_pause, help = "Pause loot processing"},
             resume = {fn = self.cmd_resume, help = "Resume loot processing"},
             status = {fn = self.cmd_status, help = "Show current status"},
@@ -255,6 +256,21 @@ function CommandHandler.new(state, config, logger, events, services)
         end
     end
     
+    function self:cmd_perf(arg)
+        if self.services.loot and self.services.loot.get_performance_stats then
+            local stats = self.services.loot:get_performance_stats()
+            self.logger:info("=== Performance Statistics ===")
+            self.logger:info("Cache Hits: %d", stats.cache_hits)
+            self.logger:info("Cache Misses: %d", stats.cache_misses)
+            self.logger:info("Cache Hit Rate: %.1f%%", stats.hit_rate)
+            self.logger:info("Items Processed: %d", stats.items_processed)
+            self.logger:info("Active Session: %s", stats.current_session or "none")
+            self.logger:info("Processed Items in Memory: %d", stats.processed_count)
+        else
+            self.logger:error("Performance stats not available")
+        end
+    end
+
     function self:cmd_pause(arg)
         self.state:set_enabled(false)
         self.logger:info("LuaLooter PAUSED")

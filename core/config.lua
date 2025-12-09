@@ -131,9 +131,11 @@ function Config.new(logger)
         self.logger:info("Configuration loaded successfully")
     end
     
-    function self:save()
-        local char_name = mq.TLO.Me.Name()
-        
+  function self:save()
+    local char_name = mq.TLO.Me.Name()
+    
+    -- Use pcall for safe file operations
+    local save_func = function()
         -- Save Settings section
         for key, value in pairs(self.settings) do
             set_ini_value(self.ini_file, "Settings", key, value)
@@ -145,7 +147,17 @@ function Config.new(logger)
         end
         
         self.logger:info("Configuration saved to: %s", self.ini_file)
+        return true
     end
+    
+    local success, err = pcall(save_func)
+    if not success then
+        self.logger:error("Failed to save configuration: %s", err)
+        return false
+    end
+    
+    return true
+  end
     
     function self:get(setting)
         return self.settings[setting]
