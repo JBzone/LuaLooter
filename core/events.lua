@@ -1,80 +1,107 @@
---[[
-DESIGN DECISION: Observer pattern for loose coupling
-WHY: Modules can communicate without direct dependencies
-     Enables plugin system and hot-swapping modules
-     Easy to add logging, debugging, or metrics to events
---]]
-
+-- core/events.lua
 local Events = {}
 
 function Events.new()
     local self = {
-        listeners = {},
-        event_history = {}  -- For debugging
+        EVENT_TYPES = {
+            -- Cash events
+            CASH_LOOTED = "cash_looted",
+            
+            -- Item events
+            ITEM_LOOTED = "item_looted",
+            ITEM_DESTROYED = "item_destroyed",
+            ITEM_PASSED = "item_passed",
+            ITEM_LEFT = "item_left",
+            
+            -- Loot processing events
+            LOOT_ACTION = "loot_action",         -- From logic to execution
+            LOOT_START = "loot_start",           -- Loot processing started
+            LOOT_COMPLETE = "loot_complete",     -- Loot processing completed
+            LOOT_ITEM = "loot_item",             -- Legacy/alias for item_looted
+            
+            -- Window events
+            LOOT_WINDOW_OPEN = "loot_window_open",
+            LOOT_WINDOW_CLOSE = "loot_window_close",
+            
+            -- No-drop timer events
+            NO_DROP_WAIT_START = "no_drop_wait_start",
+            NO_DROP_WAIT_EXPIRED = "no_drop_wait_expired",
+            
+            -- Configuration events
+            CONFIG_CHANGED = "config_changed",
+            PROFIT_UPDATED = "profit_updated",
+            
+            -- UI events
+            GUI_TOGGLE = "gui_toggle",
+            GUI_UPDATE = "gui_update",
+            
+            -- State events
+            STATE_CHANGED = "state_changed",
+            MODULE_TOGGLE = "module_toggle",
+            
+            -- Error events
+            ERROR_OCCURRED = "error_occurred",
+            WARNING_OCCURRED = "warning_occurred"
+        },
+        subscribers = {}
     }
-    
-    -- Event types (expand as needed)
-    self.EVENT_TYPES = {
-        LOOT_START = "loot_start",
-        LOOT_ITEM = "loot_item",
-        LOOT_COMPLETE = "loot_complete",
-        CASH_LOOTED = "cash_looted",
-        ITEM_IGNORED = "item_ignored",
-        NO_DROP_WAIT = "no_drop_wait",
-        CONFIG_CHANGED = "config_changed",
-        ERROR = "error"
-    }
-    
-    function self:subscribe(event_type, listener_id, callback)
-        if not self.listeners[event_type] then
-            self.listeners[event_type] = {}
-        end
-        self.listeners[event_type][listener_id] = callback
-        return self
-    end
-    
-    function self:unsubscribe(event_type, listener_id)
-        if self.listeners[event_type] then
-            self.listeners[event_type][listener_id] = nil
-        end
-        return self
-    end
     
     function self:publish(event_type, data)
-        -- Store for debugging (optional)
-        table.insert(self.event_history, {
-            time = os.time(),
-            event = event_type,
-            data = data
-        })
+        data = data or {}
+        data.event_type = event_type
+        data.timestamp = os.time()
         
-        -- Trim history if too large
-        if #self.event_history > 1000 then
-            table.remove(self.event_history, 1)
-        end
-        
-        -- Notify listeners
-        if self.listeners[event_type] then
-            for id, callback in pairs(self.listeners[event_type]) do
+        local subscribers = self.subscribers[event_type]
+        if subscribers then
+            for _, callback in ipairs(subscribers) do
                 local success, err = pcall(callback, data)
                 if not success then
-                    -- Log error but don't crash
-                    print(string.format("Event listener error [%s:%s]: %s", event_type, id, err))
+                    print(string.format("[Events] Callback error for %s: %s", event_type, err))
                 end
             end
         end
         
-        return self
+        -- Also trigger global subscribers
+        local all_subscribers = self.subscribers["*"]
+        if all_subscribers then
+            for _, callback in ipairs(all_subscribers) do
+                local success, err = pcall(callback, data)
+                if not success then
+                    print(string.format("[Events] Global callback error: %s", err))
+                end
+            end
+        end
+        
+        self.logger:debug("Event published: %s", event_type)
     end
     
-    function self:get_history(count)
-        count = count or 10
-        local start = math.max(1, #self.event_history - count + 1)
-        local result = {}
-        for i = start, #self.event_history do
-            table.insert(result, self.event_history[i])
+    function self:subscribe(event_type, callback)
+        if not self.subscribers[event_type] then
+            self.subscribers[event_type] = {}
         end
-        return result
+        table.insert(self.subscribers[event_type], callback)
+        
+        self.logger:debug("Subscribed to event: %s", event_type)
+    end
+    
+    function self:subscribe_all(callback)
+        self:subscribe("*", callback)
+    end
+    
+    function self:unsubscribe(event_type, callback)
+        if not self.subscribers[event_type] then return end
+        
+        for i, cb in ipairs(self.subscribers[event_type]) do
+            if cb == callback then
+                table.remove(self.subscribers[event_type], i)
+                self.logger:debug("Unsubscribed from event: %s", event_type)
+                break
+            end
+        end
+    end
+    
+    function self:get_event_types()
+        return self.EVENT_TYPES
     end
     
     return self

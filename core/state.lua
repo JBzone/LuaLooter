@@ -14,18 +14,23 @@ function State.new()
         processing_loot = false,
         window_was_opened = false,
         last_check = 0,
+        processed_items = {}, -- NEW: Track items already processed in current window
         
         -- Tracking state
         loot_decisions = {},
         loot_attempts = {},
         no_drop_timers = {},
         
-        -- Profit tracking (NEW)
+        -- Profit tracking (UPDATED for proper item tracking)
         profit_stats = {
             session_start = os.time(),
             items_looted = 0,
-            value_looted = 0,  -- In copper
-            cash_looted = 0    -- In copper
+            value_looted = 0,          -- In copper (items + cash)
+            cash_looted = 0,           -- In copper (cash only)
+            items_destroyed_value = 0, -- NEW: Value of destroyed items
+            items_passed = {},         -- NEW: Count of passed items
+            items_left = {},           -- NEW: Count of left items
+            items_by_name = {}         -- NEW: Detailed tracking by item name
         },
         
         -- Future GUI state (structured for expansion)
@@ -48,18 +53,81 @@ function State.new()
     function self:is_processing() return self.processing_loot end
     function self:get_decision(key) return self.loot_decisions[key] end
     
-    -- Profit stats getters
+    -- NEW: Processed items management
+    function self:is_processed(item_name) return self.processed_items[item_name] == true end
+    function self:add_processed(item_name) self.processed_items[item_name] = true; return self end
+    function self:clear_processed_items() self.processed_items = {}; return self end
+    
+    -- Profit stats getters (UPDATED)
     function self:get_profit_stats() return self.profit_stats end
     function self:get_items_looted() return self.profit_stats.items_looted end
     function self:get_value_looted() return self.profit_stats.value_looted end
     function self:get_cash_looted() return self.profit_stats.cash_looted end
     function self:get_session_start() return self.profit_stats.session_start end
+    function self:get_destroyed_value() return self.profit_stats.items_destroyed_value end
+    function self:get_passed_items() return self.profit_stats.items_passed end
+    function self:get_left_items() return self.profit_stats.items_left end
+    function self:get_items_by_name() return self.profit_stats.items_by_name end
     
-    -- Profit stats setters
-    function self:add_item_value(value)
+    -- NEW: Get total profit display (items + cash - destroyed)
+    function self:get_net_profit()
+        return self.profit_stats.value_looted + self.profit_stats.cash_looted - self.profit_stats.items_destroyed_value
+    end
+    
+    -- NEW: Get profit display string
+    function self:get_profit_display()
+        local net_profit = self:get_net_profit()
+        local plat = math.floor(net_profit / 1000)
+        local remainder = net_profit % 1000
+        local gold = math.floor(remainder / 100)
+        remainder = remainder % 100
+        local silver = math.floor(remainder / 10)
+        local copper = remainder % 10
+        
+        return string.format("%dpp %dgp %dsp %dcp", plat, gold, silver, copper)
+    end
+    
+    -- NEW: Get cash display string
+    function self:get_cash_display()
+        local cash = self.profit_stats.cash_looted
+        local plat = math.floor(cash / 1000)
+        local remainder = cash % 1000
+        local gold = math.floor(remainder / 100)
+        remainder = remainder % 100
+        local silver = math.floor(remainder / 10)
+        local copper = remainder % 10
+        
+        return string.format("%dpp %dgp %dsp %dcp", plat, gold, silver, copper)
+    end
+    
+    -- NEW: Get destroyed value display string
+    function self:get_destroyed_display()
+        local destroyed = self.profit_stats.items_destroyed_value
+        local plat = math.floor(destroyed / 1000)
+        local remainder = destroyed % 1000
+        local gold = math.floor(remainder / 100)
+        remainder = remainder % 100
+        local silver = math.floor(remainder / 10)
+        local copper = remainder % 10
+        
+        return string.format("%dpp %dgp %dsp %dcp", plat, gold, silver, copper)
+    end
+    
+    -- Profit stats setters (UPDATED)
+    function self:add_item_value(item_name, value)
         if value and value > 0 then
             self.profit_stats.value_looted = self.profit_stats.value_looted + value
             self.profit_stats.items_looted = self.profit_stats.items_looted + 1
+            
+            -- Track by item name
+            if not self.profit_stats.items_by_name[item_name] then
+                self.profit_stats.items_by_name[item_name] = {
+                    count = 0,
+                    total_value = 0
+                }
+            end
+            self.profit_stats.items_by_name[item_name].count = self.profit_stats.items_by_name[item_name].count + 1
+            self.profit_stats.items_by_name[item_name].total_value = self.profit_stats.items_by_name[item_name].total_value + value
         end
         return self
     end
@@ -72,12 +140,64 @@ function State.new()
         return self
     end
     
+    -- NEW: Track destroyed item value
+    function self:add_destroyed_value(item_name, value)
+        if value and value > 0 then
+            self.profit_stats.items_destroyed_value = self.profit_stats.items_destroyed_value + value
+            
+            -- Track in items_by_name
+            if not self.profit_stats.items_by_name[item_name] then
+                self.profit_stats.items_by_name[item_name] = {
+                    count = 0,
+                    destroyed = 0,
+                    total_value = 0
+                }
+            end
+            self.profit_stats.items_by_name[item_name].destroyed = (self.profit_stats.items_by_name[item_name].destroyed or 0) + 1
+        end
+        return self
+    end
+    
+    -- NEW: Track passed item
+    function self:add_passed_item(item_name)
+        self.profit_stats.items_passed[item_name] = (self.profit_stats.items_passed[item_name] or 0) + 1
+        
+        -- Track in items_by_name
+        if not self.profit_stats.items_by_name[item_name] then
+            self.profit_stats.items_by_name[item_name] = {
+                count = 0,
+                passed = 0
+            }
+        end
+        self.profit_stats.items_by_name[item_name].passed = (self.profit_stats.items_by_name[item_name].passed or 0) + 1
+        return self
+    end
+    
+    -- NEW: Track left item
+    function self:add_left_item(item_name)
+        self.profit_stats.items_left[item_name] = (self.profit_stats.items_left[item_name] or 0) + 1
+        
+        -- Track in items_by_name
+        if not self.profit_stats.items_by_name[item_name] then
+            self.profit_stats.items_by_name[item_name] = {
+                count = 0,
+                left = 0
+            }
+        end
+        self.profit_stats.items_by_name[item_name].left = (self.profit_stats.items_by_name[item_name].left or 0) + 1
+        return self
+    end
+    
     function self:reset_profit_stats()
         self.profit_stats = {
             session_start = os.time(),
             items_looted = 0,
             value_looted = 0,
-            cash_looted = 0
+            cash_looted = 0,
+            items_destroyed_value = 0,
+            items_passed = {},
+            items_left = {},
+            items_by_name = {}
         }
         return self
     end
@@ -132,6 +252,20 @@ function State.new()
             end
         end
         return cleared
+    end
+    
+    -- NEW: Check if any no-drop timers are active
+    function self:has_active_no_drop_timers()
+        return next(self.no_drop_timers) ~= nil
+    end
+    
+    -- NEW: Get all active no-drop items
+    function self:get_active_no_drop_items()
+        local items = {}
+        for item_name, _ in pairs(self.no_drop_timers) do
+            table.insert(items, item_name)
+        end
+        return items
     end
     
     return self

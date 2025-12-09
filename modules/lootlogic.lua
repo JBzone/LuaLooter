@@ -34,8 +34,244 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
             cache_misses = 0,
             items_processed = 0,
             session_items = 0
-        }
+        },
+        
+        -- FIX: Add event-driven processing state
+        waiting_for_loot = false,
+        last_loot_time = 0,
+        pending_loot_actions = {},
+        loot_delay = 1500,  -- 1.5 seconds between commands
+        loot_timeout = 5000, -- 5 second timeout
     }
+    
+    -- Initialize event handlers (FIXES RACE CONDITION)
+    function self:init_event_handlers()
+        self.logger:debug("Initializing LootLogic event handlers")
+        
+        -- Register loot completion events
+        mq.event("ItemLooted", "#*#You have looted a #*#", function()
+            self:handle_loot_complete()
+        end)
+        
+        mq.event("ItemLootedAn", "#*#You have looted an #*#", function()
+            self:handle_loot_complete()
+        end)
+        
+        mq.event("ItemDestroyed", "#*#You successfully destroyed #*#", function(line)
+            self:handle_destroy_complete(line)
+        end)
+        
+        mq.event("ItemPassed", "#*#You pass on #*#", function()
+            self:handle_action_complete()
+        end)
+        
+        mq.event("ItemLeft", "#*#You decide to leave #*#", function()
+            self:handle_action_complete()
+        end)
+        
+        -- Subscribe to loot action events
+        self.events:subscribe(self.events.EVENT_TYPES.LOOT_ACTION, function(data)
+            self:execute_loot_action(data)
+        end)
+        
+        self.last_loot_time = mq.gettime()
+    end
+    
+    -- Event handlers (FIXES RACE CONDITION)
+    function self:handle_loot_complete()
+        self.logger:debug("Loot completed event received")
+        mq.delay(100)
+        self.waiting_for_loot = false
+        self.last_loot_time = mq.gettime()
+        self.state:set_processing(false)
+        
+        self:process_next_queued()
+    end
+    
+    function self:handle_destroy_complete(line)
+        local item_name = line:match("You successfully destroyed (%d+) (.+)%.")
+        if item_name then
+            item_name = item_name:gsub("^%d+ ", "")
+            self.logger:debug("Destroy completed: %s", item_name)
+            
+            -- Track destroyed item value
+            local item_value = self.items:get_item_value(item_name) or 0
+            self.events:publish(self.events.EVENT_TYPES.ITEM_DESTROYED, {
+                name = item_name,
+                value = item_value
+            })
+        end
+        
+        mq.delay(100)
+        self.waiting_for_loot = false
+        self.last_loot_time = mq.gettime()
+        self.state:set_processing(false)
+        
+        self:process_next_queued()
+    end
+    
+    function self:handle_action_complete()
+        self.logger:debug("Loot action (pass/leave) completed")
+        mq.delay(100)
+        self.waiting_for_loot = false
+        self.last_loot_time = mq.gettime()
+        self.state:set_processing(false)
+        
+        self:process_next_queued()
+    end
+    
+    function self:process_next_queued()
+        if #self.pending_loot_actions > 0 then
+            mq.delay(500)
+            local next_action = table.remove(self.pending_loot_actions, 1)
+            self:execute_loot_action(next_action)
+        end
+    end
+    
+    function self:wait_for_loot_cooldown()
+        local current_time = mq.gettime()
+        local time_since_last = current_time - self.last_loot_time
+        
+        -- Wait minimum delay between loot commands
+        if time_since_last < self.loot_delay then
+            local wait_time = self.loot_delay - time_since_last
+            self.logger:debug("Waiting %dms for loot cooldown", wait_time)
+            mq.delay(wait_time)
+        end
+        
+        -- Wait if we're currently processing loot
+        local start_wait = mq.gettime()
+        while self.waiting_for_loot do
+            local time_waiting = mq.gettime() - self.last_loot_time
+            if time_waiting > self.loot_timeout then
+                self.logger:warn("Loot timeout, resetting state")
+                self.waiting_for_loot = false
+                self.state:set_processing(false)
+                break
+            end
+            mq.delay(100)
+            
+            if mq.gettime() - start_wait > 10000 then
+                self.logger:warn("Safety timeout, forcing reset")
+                self.waiting_for_loot = false
+                self.state:set_processing(false)
+                break
+            end
+        end
+    end
+    
+    -- Execute loot action with event waiting (FIXES RACE CONDITION)
+    function self:execute_loot_action(data)
+        -- Wait for cooldown
+        self:wait_for_loot_cooldown()
+        
+        -- Set state
+        self.waiting_for_loot = true
+        self.state:set_processing(true)
+        self.last_loot_time = mq.gettime()
+        
+        local index = data.index
+        local action = data.action
+        local name = data.name
+        local is_shared = data.is_shared
+        local item_value = data.item_value or 0
+        local item_info = data.info or {}
+        
+        self.logger:info("Executing %s on %s (slot %d, shared: %s)", 
+                        action, name, index, tostring(is_shared))
+        
+        -- Parse action string (could be "PASS|Playername")
+        local action_parts = {}
+        for part in string.gmatch(action, "[^|]+") do
+            table.insert(action_parts, part)
+        end
+        
+        local base_action = action_parts[1]
+        local target_player = action_parts[2]
+        
+        -- Execute the command
+        local command = nil
+        if base_action == "KEEP" or base_action == "CASH" or base_action == "TRADESKILL" or 
+           base_action == "QUEST" or base_action == "SELL" then
+            if is_shared then
+                command = string.format('/advloot shared %d giveto %s', index, mq.TLO.Me.Name())
+            else
+                command = string.format('/advloot personal %d loot', index)
+            end
+            
+        elseif base_action == "IGNORE" or base_action == "DESTROY" then
+            if is_shared then
+                command = string.format('/advloot shared %d leave', index)
+            else
+                command = string.format('/advloot personal %d never', index)
+            end
+            
+        elseif base_action == "PASS" and target_player then
+            if is_shared then
+                command = string.format('/advloot shared %d giveto %s', index, target_player)
+            else
+                command = string.format('/advloot personal %d loot', index)
+            end
+            
+        elseif base_action == "LEAVE" then
+            if is_shared then
+                command = string.format('/advloot shared %d leave', index)
+            else
+                command = string.format('/advloot personal %d never', index)
+            end
+        end
+        
+        if command then
+            if self.config.settings.alpha_mode then
+                self.logger:info("[ALPHA] Would execute: %s", command)
+                self.waiting_for_loot = false
+                self.state:set_processing(false)
+                self.events:publish(self.events.EVENT_TYPES.LOOT_COMPLETE, {
+                    name = name,
+                    action = action,
+                    command = command,
+                    alpha_mode = true
+                })
+                return true
+            end
+            
+            self.logger:debug("Executing command: %s", command)
+            mq.cmd(command)
+            
+            -- Track profit immediately (will be confirmed by event)
+            if base_action == "KEEP" or base_action == "CASH" or base_action == "TRADESKILL" or 
+               base_action == "QUEST" or base_action == "SELL" then
+                self.events:publish(self.events.EVENT_TYPES.ITEM_LOOTED, {
+                    name = name,
+                    value = item_value,
+                    action = action
+                })
+            elseif base_action == "DESTROY" then
+                self.events:publish(self.events.EVENT_TYPES.ITEM_DESTROYED, {
+                    name = name,
+                    value = item_value,
+                    action = action
+                })
+            elseif base_action == "PASS" then
+                self.events:publish(self.events.EVENT_TYPES.ITEM_PASSED, {
+                    name = name,
+                    action = action
+                })
+            elseif base_action == "LEAVE" or base_action == "IGNORE" then
+                self.events:publish(self.events.EVENT_TYPES.ITEM_LEFT, {
+                    name = name,
+                    action = action
+                })
+            end
+            
+            return true
+        end
+        
+        self.logger:warn("No command for action: %s on %s", action, name)
+        self.waiting_for_loot = false
+        self.state:set_processing(false)
+        return false
+    end
     
     -- Generate a unique session ID for current loot window
     function self:generate_session_id()
@@ -113,6 +349,8 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
         self.decision_cache = {}
         self.current_session_id = nil
         self.stats.session_items = 0
+        self.pending_loot_actions = {}
+        self.waiting_for_loot = false
         self.logger:debug("Cleared all processed items and cache")
     end
     
@@ -134,11 +372,9 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     
     -- Main processing function with performance improvements
     function self:process(filter_actions)
-        if not self.state:is_enabled() or self.state:is_processing() then
+        if not self.state:is_enabled() or self.waiting_for_loot then
             return
         end
-        
-        self.state:set_processing(true)
         
         local has_loot = mq.TLO.AdvLoot.SCount() > 0 or mq.TLO.AdvLoot.PCount() > 0
         
@@ -150,15 +386,6 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
             end
             
             self.events:publish(self.events.EVENT_TYPES.LOOT_START, {})
-            
-            -- Open window if needed
-            if self.config.settings.auto_open_window and 
-               not self.config.settings.alpha_mode and
-               not mq.TLO.Window("AdvancedLootWnd").Open() then
-                mq.cmd('/advloot')
-                self.state.window_was_opened = true
-                mq.delay(1000)
-            end
             
             -- Check for expired waiting periods
             self:check_waiting_items()
@@ -179,8 +406,6 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
         if os.time() % 30 == 0 then  -- Every 30 seconds
             self:log_performance_stats()
         end
-        
-        self.state:set_processing(false)
     end
     
     local function is_master_looter()
@@ -231,19 +456,36 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
                         goto continue
                     end
                     
-                    -- Get action with caching
+                    -- Get action with caching using EXACT PHASE 1-3 LOGIC
                     local action = self:get_cached_action(name, i, true, filter_actions)
                     
                     if action and action ~= "ASK" then
-                        -- Execute with delay between items
-                        if i < shared_count then
-                            mq.delay(100)
+                        -- Queue or execute action
+                        if self.waiting_for_loot then
+                            -- Queue for later execution
+                            table.insert(self.pending_loot_actions, {
+                                index = i,
+                                action = action,
+                                name = name,
+                                info = {link = item.Link()},
+                                is_shared = true,
+                                item_value = self.items:get_item_value(name) or 0
+                            })
+                            self.logger:info("Queued %s for %s", action, name)
+                        else
+                            -- Execute immediately via event
+                            self.events:publish(self.events.EVENT_TYPES.LOOT_ACTION, {
+                                index = i,
+                                action = action,
+                                name = name,
+                                info = {link = item.Link()},
+                                is_shared = true,
+                                item_value = self.items:get_item_value(name) or 0
+                            })
                         end
                         
-                        local executed = self:execute_action(i, action, name, true)
-                        if executed then
-                            self:mark_item_processed(name, action)
-                        end
+                        self:mark_item_processed(name, action)
+                        return true -- Process one at a time
                     else
                         -- Mark as processed even if no action (e.g., ASK)
                         self:mark_item_processed(name, action or "NO_ACTION")
@@ -280,18 +522,36 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
                         goto personal_continue
                     end
                     
-                    -- Get action with caching
+                    -- Get action with caching using EXACT PHASE 1-3 LOGIC
                     local action = self:get_cached_action(name, i, false, filter_actions)
                     
                     if action and action ~= "ASK" then
-                        if i < personal_count then
-                            mq.delay(100)
+                        -- Queue or execute action
+                        if self.waiting_for_loot then
+                            -- Queue for later execution
+                            table.insert(self.pending_loot_actions, {
+                                index = i,
+                                action = action,
+                                name = name,
+                                info = {link = item.Link()},
+                                is_shared = false,
+                                item_value = self.items:get_item_value(name) or 0
+                            })
+                            self.logger:info("Queued %s for %s", action, name)
+                        else
+                            -- Execute immediately via event
+                            self.events:publish(self.events.EVENT_TYPES.LOOT_ACTION, {
+                                index = i,
+                                action = action,
+                                name = name,
+                                info = {link = item.Link()},
+                                is_shared = false,
+                                item_value = self.items:get_item_value(name) or 0
+                            })
                         end
                         
-                        local executed = self:execute_action(i, action, name, false)
-                        if executed then
-                            self:mark_item_processed(name, action)
-                        end
+                        self:mark_item_processed(name, action)
+                        return true -- Process one at a time
                     else
                         self:mark_item_processed(name, action or "NO_ACTION")
                     end
@@ -299,6 +559,8 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
                 end
             end
         end
+        
+        return false
     end
     
     -- Get action with caching layer
@@ -319,9 +581,9 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
             end
         end
         
-        -- Cache miss, calculate action
+        -- Cache miss, calculate action using EXACT PHASE 1-3 LOGIC
         self.stats.cache_misses = self.stats.cache_misses + 1
-        local action = self:get_action_for_item(name, index, is_shared, filter_actions)
+        local action = self:get_action_for_item_phases(name, index, is_shared, filter_actions)
         
         -- Cache the decision (valid for 30 seconds)
         if action then
@@ -351,102 +613,206 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
             self.current_session_id or "none", self.stats.session_items)
     end
     
-    -- Get action for item (ORIGINAL LOGIC WITH MINIMAL CHANGES)
-    function self:get_action_for_item(name, index, is_shared, filter_actions)
+    -- Get action for item using EXACT PHASE 1-3 LOGIC as you specified
+    function self:get_action_for_item_phases(name, index, is_shared, filter_actions)
+        self.logger:debug("PHASE START for %s (filter: %s)", name, filter_actions and filter_actions[name] or "nil")
+        
         -- Get item info first
         local item_info = self.items:get_item_info(name)
+        local item_link = item_info and item_info.link or nil
         
-        -- SPECIAL HANDLING FOR NO-DROP ITEMS
-        if item_info and item_info.no_drop then
-            -- Check filters first for no-drop items
-            if filter_actions and filter_actions[name] then
-                local filter_action = filter_actions[name]
-                if filter_action.is_shared == is_shared and filter_action.index == index then
-                    self.logger:debug("Filter action found for no-drop item %s: %s", name, filter_action.action)
-                    
-                    -- Never/No filters should already have checked INI for pass rules in filter_to_action
-                    -- So we can use the filter action directly
-                    if filter_action.action == "KEEP" or filter_action.action == "PASS" then
-                        -- Explicit rule to loot or pass no-drop item
-                        return filter_action.action
-                    elseif filter_action.action == "LEAVE" then
-                        -- Never/No filter on no-drop with no pass rule = wait 5 minutes
-                        self:start_waiting_period(name, "no_drop_never_filter")
-                        return "LEAVE"
-                    elseif filter_action.action == "IGNORE" then
-                        -- Shouldn't happen for no-drop items with Never/No filter, but handle it
-                        self:start_waiting_period(name, "no_drop_filter_ignore")
-                        return "LEAVE"
-                    end
-                end
-            end
-            
-            -- Check INI rules for no-drop items (when no filter)
-            local ini_config = self.items:get_ini_config(name)
-            if ini_config then
-                -- Check if we should use the general section
-                if not self.config.char_settings.LootFromGeneralSection then
-                    if ini_config.general then
-                        self.logger:debug("Skipping general section rule for no-drop item %s", name)
-                        ini_config = nil
-                    end
-                end
-                
-                if ini_config then
-                    self.logger:debug("Found INI config for no-drop item %s", name)
-                    local action = self:handle_ini_rule(name, ini_config, item_info)
-                    if action then
-                        if action == "KEEP" or action:match("^PASS|") then
-                            -- Explicit rule to loot or pass no-drop item
-                            return action
-                        end
-                        -- INI says IGNORE for no-drop = wait 5 minutes
-                    end
-                end
-            end
-            
-            -- No explicit rule to loot/pass no-drop item = wait 5 minutes
-            self:start_waiting_period(name, "no_drop_no_explicit_rule")
-            return "LEAVE"
-        end
-        
-        -- NORMAL ITEMS (not no-drop)
-        
-        -- 1. CHECK FILTERS FIRST (PRIORITY)
+        -- PHASE 1: ADVANCED LOOT FILTER (Highest Priority)
         if filter_actions and filter_actions[name] then
             local filter_action = filter_actions[name]
             if filter_action.is_shared == is_shared and filter_action.index == index then
-                self.logger:debug("Using filter action for %s: %s", name, filter_action.action)
+                local advloot_filter = filter_action.action
                 
-                -- For Never/No filters on non-no-drop items, the action will be:
-                -- "PASS|playername" if INI has pass rule
-                -- "IGNORE" if no pass rule
-                return filter_action.action
+                self.logger:debug("PHASE 1: Filter action: %s", advloot_filter)
+                
+                if advloot_filter == "Need" or advloot_filter == "Greed" then
+                    self.logger:info("PHASE 1: Need/Greed filter -> KEEP")
+                    return "KEEP"
+                    
+                elseif advloot_filter == "Never" or advloot_filter == "No" then
+                    self.logger:info("PHASE 1: Never/No filter")
+                    
+                    -- Step 1: Check INI PassTo Rule
+                    local ini_rule = self.items:get_item_rule(name)
+                    if ini_rule and ini_rule:find("PassTo") then
+                        self.logger:info("  Step 1: INI PassTo rule -> PASS")
+                        return self:process_passto_rule(name, ini_rule)
+                    end
+                    
+                    -- Step 2: Check NO DROP Property
+                    local is_no_drop = item_info and item_info.no_drop
+                    
+                    if is_no_drop then
+                        self.logger:info("  Step 2: NO DROP -> LEAVE_IN_WINDOW (5min timer)")
+                        -- Start 5-minute timer
+                        self:start_waiting_period(name, "no_drop_never_filter")
+                        return "LEAVE"
+                    else
+                        self.logger:info("  Step 2: Not NO DROP -> LEAVE_ON_CORPSE")
+                        return "LEAVE"
+                    end
+                end
             end
         end
         
-        -- 2. NO FILTER - CHECK INI RULES
-        local ini_config = self.items:get_ini_config(name)
-        if ini_config then
-            -- Check if we should use the general section
-            if not self.config.char_settings.LootFromGeneralSection then
-                if ini_config.general then
-                    self.logger:debug("Skipping general section rule for %s (LootFromGeneralSection=false)", name)
-                    ini_config = nil
-                end
-            end
+        -- PHASE 2: NO FILTER SET (advloot_filter is nil/blank)
+        local ini_rule = self.items:get_item_rule(name)
+        
+        if ini_rule then
+            self.logger:debug("PHASE 2: INI rule exists: %s", ini_rule)
             
-            if ini_config then
-                self.logger:debug("Found INI config for %s", name)
-                local action = self:handle_ini_rule(name, ini_config, item_info)
-                if action then
-                    return action
+            if ini_rule == "CHANGEME" or ini_rule == "ASK" then
+                self.logger:info("PHASE 2: Rule is CHANGEME/ASK -> Phase 3")
+                -- PHASE 3: Default Logic
+                return self:apply_default_logic(name, item_info)
+                
+            elseif ini_rule:find("PassTo") then
+                self.logger:info("PHASE 2: Rule is PassTo -> Process Waterfall")
+                return self:process_passto_rule(name, ini_rule)
+                
+            else
+                -- Specific action rule
+                self.logger:info("PHASE 2: Specific action -> %s", ini_rule)
+                return self:handle_ini_rule(name, {action = ini_rule}, item_info)
+            end
+        else
+            -- No rule exists
+            self.logger:info("PHASE 2: No INI rule -> Phase 3")
+            return self:apply_default_logic(name, item_info)
+        end
+    end
+    
+    -- PHASE 3: DEFAULT LOGIC
+    function self:apply_default_logic(item_name, item_info)
+        self.logger:info("PHASE 3: Applying default logic for %s", item_name)
+        
+        local action = "ASK"
+        
+        if item_info then
+            -- Use Item TLO properties as you specified
+            if item_info.cash then
+                action = "CASH"
+                self.logger:info("  CashLoot -> CASH")
+                
+            elseif item_info.tradeskill then
+                -- Check value thresholds
+                local item_value = self.items:get_item_value(item_name) or 0
+                local threshold = self.config.settings.tradeskill_threshold or 100
+                
+                if item_value > threshold then
+                    action = "TRADESKILL"
+                    self.logger:info("  Tradeskill (value %d > %d) -> TRADESKILL", item_value, threshold)
+                else
+                    action = "SELL"
+                    self.logger:info("  Tradeskill (value %d <= %d) -> SELL", item_value, threshold)
                 end
+                
+            elseif item_info.quest then
+                action = "QUEST"
+                self.logger:info("  Quest -> QUEST")
+                
+            elseif item_info.no_drop then
+                -- Apply global thresholds for NoDrop items
+                local item_value = self.items:get_item_value(item_name) or 0
+                local keep_threshold = self.config.settings.keep_threshold or 1000
+                
+                if item_value > keep_threshold then
+                    action = "KEEP"
+                    self.logger:info("  NoDrop (value %d > %d) -> KEEP", item_value, keep_threshold)
+                else
+                    action = "DESTROY"
+                    self.logger:info("  NoDrop (value %d <= %d) -> DESTROY", item_value, keep_threshold)
+                end
+                
+            else
+                -- Regular item, check value
+                local item_value = self.items:get_item_value(item_name) or 0
+                local keep_threshold = self.config.settings.keep_threshold or 5000
+                local sell_threshold = self.config.settings.sell_threshold or 100
+                
+                if item_value > keep_threshold then
+                    action = "KEEP"
+                    self.logger:info("  Regular (value %d > %d) -> KEEP", item_value, keep_threshold)
+                elseif item_value > sell_threshold then
+                    action = "SELL"
+                    self.logger:info("  Regular (value %d > %d) -> SELL", item_value, sell_threshold)
+                else
+                    action = "DESTROY"
+                    self.logger:info("  Regular (value %d <= %d) -> DESTROY", item_value, sell_threshold)
+                end
+            end
+        else
+            -- Can't inspect item
+            action = "ASK"
+            self.logger:info("  Can't inspect item -> ASK")
+        end
+        
+        -- Update INI with new permanent rule
+        self.items:update_item_rule(item_name, action)
+        
+        return action
+    end
+    
+    -- Process PassTo rule with quantity-limited waterfall
+    function self:process_passto_rule(item_name, rule_value)
+        self.logger:debug("Processing PassTo waterfall: %s = %s", item_name, rule_value)
+        
+        -- Parse rule like "PassTo|PlayerA[5]|PlayerB[5]|"
+        local players = {}
+        local player_counts = {}
+        
+        for player, count in rule_value:gmatch("([^|]+)%[(%d+)%]") do
+            table.insert(players, player)
+            player_counts[player] = tonumber(count)
+        end
+        
+        -- Find first player with remaining passes
+        for i, player in ipairs(players) do
+            local count = player_counts[player]
+            
+            if count and count > 0 then
+                self.logger:info("  Passing to %s (%d remaining)", player, count)
+                
+                -- Update rule with decremented count
+                local new_count = count - 1
+                local old_pattern = player .. "%[" .. count .. "%]"
+                local new_entry = player .. "[" .. new_count .. "]"
+                
+                if new_count == 0 then
+                    -- Remove player from rule
+                    rule_value = rule_value:gsub(old_pattern .. "|", "")
+                    rule_value = rule_value:gsub("|" .. old_pattern, "")
+                    
+                    -- If rule becomes empty, set to just "PassTo"
+                    if rule_value == "PassTo|" then
+                        rule_value = "PassTo"
+                        self.logger:debug("  All counts exhausted, rule now: PassTo")
+                    end
+                else
+                    rule_value = rule_value:gsub(old_pattern, new_entry)
+                    self.logger:debug("  Updated %s count to %d", player, new_count)
+                end
+                
+                -- Update INI
+                self.items:update_item_rule(item_name, rule_value)
+                
+                return "PASS|" .. player
             end
         end
         
-        -- 3. NO INI RULE - CHECK ITEM PROPERTIES WITH DEFAULT BEHAVIOR
-        return self:determine_action(name, nil, item_info, 0)
+        -- If all counts are 0, just pass to first player
+        if #players > 0 then
+            self.logger:debug("  All counts 0, passing to %s", players[1])
+            return "PASS|" .. players[1]
+        end
+        
+        -- Default to leave
+        self.logger:debug("  No players in rule, leaving")
+        return "LEAVE"
     end
     
     function self:handle_ini_rule(item_name, ini_config, item_info)
@@ -502,210 +868,6 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
         return nil
     end
     
-    function self:determine_action(name, ini_config, item_info, depth)
-        -- If we're too deep in recursion, default to ignore
-        if depth > 10 then
-            self.logger:warn("Recursion depth exceeded for: %s, defaulting to IGNORE", name)
-            return "IGNORE"
-        end
-        
-        -- Check if item is no-drop (SPECIAL CASE - always wait unless explicit rule)
-        if item_info and item_info.no_drop then
-            -- No filter, no INI rule for no-drop item = ALWAYS wait 5 minutes
-            self:start_waiting_period(name, "no_drop_no_rule")
-            return "LEAVE"
-        end
-        
-        -- Check if item is Lore
-        if item_info and item_info.lore then
-            local existing_count = self.items.inventory:get_item_count(name)
-            if existing_count > 0 then
-                self.logger:info("Lore item %s already in inventory, ignoring", name)
-                return "IGNORE"
-            end
-        end
-        
-        -- DEFAULT BEHAVIOR BASED ON CONFIG SETTINGS
-        if item_info then
-            -- Check for cash/coin items
-            if item_info.cash and self.config.char_settings.AutoLootCash then
-                self.logger:info("Auto-looting cash item: %s", name)
-                return "KEEP"
-            end
-            
-            -- Check for quest items (LOOT REGARDLESS OF VALUE)
-            if item_info.quest and self.config.char_settings.AutoLootQuest then
-                self.logger:info("Auto-looting quest item: %s", name)
-                return "KEEP"
-            end
-            
-            -- Check for collectible items
-            if item_info.collectible and self.config.char_settings.AutoLootCollectible then
-                self.logger:info("Auto-looting collectible item: %s", name)
-                return "KEEP"
-            end
-            
-            -- Check for tradeskill items
-            if item_info.tradeskill then
-                if self.config.char_settings.AlwaysLootTradeskills then
-                    self.logger:info("Auto-looting tradeskill item: %s", name)
-                    return "KEEP"
-                else
-                    local keep_tradeskill = self.config.settings.keep_tradeskill_items or false
-                    if keep_tradeskill then
-                        self.logger:info("Tradeskill item detected: %s (keeping)", name)
-                        return "KEEP"
-                    else
-                        self.logger:info("Tradeskill item detected: %s (ignoring)", name)
-                        return "IGNORE"
-                    end
-                end
-            end
-            
-            -- Check item value for general items
-            if item_info.value then
-                local min_value = self.config.char_settings.LootValue or 0
-                if item_info.value >= min_value then
-                    self.logger:debug("Item %s value %d >= min %d, keeping", name, item_info.value, min_value)
-                    return "KEEP"
-                else
-                    -- Check if we should loot trash items
-                    if self.config.char_settings.LootTrash then
-                        self.logger:debug("Looting trash item: %s (value: %d)", name, item_info.value)
-                        return "KEEP"
-                    else
-                        self.logger:debug("Item %s value %d < min %d, ignoring", name, item_info.value, min_value)
-                        return "IGNORE"
-                    end
-                end
-            end
-        end
-        
-        -- Default action if nothing matched
-        local default_action = "IGNORE"  -- Default to ignore for safety
-        self.logger:debug("No specific rule matched for %s, defaulting to: %s", name, default_action)
-        return default_action
-    end
-    
-    function self:execute_action(index, action, name, is_shared)
-        -- Parse action string (could be "PASS|Playername")
-        local action_parts = {}
-        for part in string.gmatch(action, "[^|]+") do
-            table.insert(action_parts, part)
-        end
-        
-        local base_action = action_parts[1]
-        local target_player = action_parts[2]
-        
-        -- Check if we're already processing - wait a bit if we are
-        if self.state:is_processing() then
-            self.logger:debug("Waiting for previous loot to complete...")
-            mq.delay(500)
-        end
-        
-        -- Set processing flag
-        self.state:set_processing(true)
-        
-        -- Create a unique key for this loot attempt
-        local npc_id = mq.TLO.Target.ID() or 0
-        local item_key = string.format("%d_%s_%d", npc_id, name, os.time())
-        
-        -- Check if we should attempt this loot (prevent spam)
-        local now = os.time()
-        local attempts = self.state.loot_attempts[item_key] or {count = 0, last_attempt = 0}
-        
-        -- Reset counter if it's been more than 10 seconds
-        if now - attempts.last_attempt > 10 then
-            attempts.count = 0
-        end
-        
-        attempts.count = attempts.count + 1
-        attempts.last_attempt = now
-        
-        -- Save back to state
-        self.state.loot_attempts[item_key] = attempts
-        
-        -- If we've tried this item 3 times in 10 seconds, skip it
-        if attempts.count > 3 then
-            self.logger:warn("Skipping %s - too many attempts (NPC: %d)", name, npc_id)
-            self.state:set_processing(false)
-            return false
-        end
-        
-        -- Execute the command
-        local command = nil
-        if base_action == "KEEP" then
-            if is_shared then
-                command = string.format('/advloot shared %d giveto %s', index, mq.TLO.Me.Name())
-            else
-                command = string.format('/advloot personal %d loot', index)
-            end
-            self.logger:info("KEEPING %s (shared: %s, NPC: %d)", name, tostring(is_shared), npc_id)
-            
-        elseif base_action == "IGNORE" then
-            if is_shared then
-                command = string.format('/advloot shared %d leave', index)
-            else
-                command = string.format('/advloot personal %d never', index)
-            end
-            self.logger:info("IGNORING %s (shared: %s, NPC: %d)", name, tostring(is_shared), npc_id)
-            
-        elseif base_action == "PASS" and target_player then
-            if is_shared then
-                command = string.format('/advloot shared %d giveto %s', index, target_player)
-                self.logger:info("PASSING %s to %s (NPC: %d)", name, target_player, npc_id)
-            else
-                -- Can't pass personal loot
-                self.logger:warn("Cannot pass personal loot item: %s, keeping instead (NPC: %d)", name, npc_id)
-                command = string.format('/advloot personal %d loot', index)
-            end
-            
-        elseif base_action == "LEAVE" then
-            -- For "LEAVE" action on no-drop items, DO NOT issue any command
-            if is_shared then
-                self.logger:info("LEAVING %s in loot window (no-drop item, NPC: %d, will expire in 5 min)", name, npc_id)
-                self.state:set_processing(false)
-                return true  -- No command, item stays in window
-            else
-                self.logger:info("LEAVING %s in window (personal, no-drop waiting period, NPC: %d)", name, npc_id)
-                self.state:set_processing(false)
-                return true  -- No command executed
-            end
-            
-        else
-            self.logger:warn("Unknown action: %s for %s, ignoring (NPC: %d)", action, name, npc_id)
-            if is_shared then
-                command = string.format('/advloot shared %d leave', index)
-            else
-                command = string.format('/advloot personal %d never', index)
-            end
-        end
-        
-        if command then
-            -- In alpha mode, just log
-            if self.config.settings.alpha_mode then
-                self.logger:info("[ALPHA] Would execute: %s", command)
-                self.state:set_processing(false)
-                return true
-            end
-            
-            -- Production mode - actually execute (with proper delay)
-            self.logger:debug("Executing command: %s", command)
-            mq.delay(500)  -- CRITICAL: 500ms delay for command to process
-            mq.cmd(command)
-            
-            -- Clear processing flag
-            self.state:set_processing(false)
-            
-            self.logger:info("Looted: %s (%s, NPC: %d)", name, action, npc_id)
-            return true
-        end
-        
-        -- Clear processing flag if we didn't execute a command
-        self.state:set_processing(false)
-        return false
-    end
-    
     function self:start_waiting_period(item_name, reason)
         if not self.waiting_items[item_name] then
             local wait_time = self.config.settings.no_drop_wait_time or 300  -- Default 5 minutes
@@ -737,6 +899,16 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
                 self.logger:info("Wait period expired for %s (%d seconds). Item will be left on corpse.", 
                                item_name, elapsed)
                 
+                -- Trigger leave action
+                self.events:publish(self.events.EVENT_TYPES.LOOT_ACTION, {
+                    index = 0, -- Unknown index
+                    action = "LEAVE",
+                    name = item_name,
+                    info = {},
+                    is_shared = true,
+                    item_value = 0
+                })
+                
                 -- Remove from waiting list
                 self.waiting_items[item_name] = nil
                 
@@ -760,8 +932,13 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     
     function self:clear_waiting_items()
         self.waiting_items = {}
-        self.logger:info("Cleared all waiting items")
+        self.pending_loot_actions = {}
+        self.waiting_for_loot = false
+        self.logger:info("Cleared all waiting items and pending actions")
     end
+    
+    -- Initialize event handlers on creation
+    self:init_event_handlers()
     
     return self
 end
