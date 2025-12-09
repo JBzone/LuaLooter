@@ -691,8 +691,8 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
             
             -- Production mode - actually execute (with proper delay)
             self.logger:debug("Executing command: %s", command)
-            mq.cmd(command)
             mq.delay(500)  -- CRITICAL: 500ms delay for command to process
+            mq.cmd(command)
             
             -- Clear processing flag
             self.state:set_processing(false)

@@ -19,18 +19,34 @@ function GUIManager.new(state, config, logger)
         initialized = false
     }
     
-    function self:init()
-        if self.initialized then return end
-        
-        self.logger:debug("Initializing GUI Manager")
-        
-        -- Create main GUI window
-        local MainWindow = require('gui.main')
-        self.windows.main = MainWindow.new(self.state, self.config, self.logger)
-        
-        self.initialized = true
-        self.logger:debug("GUI Manager initialized")
+  function self:init()
+    if self.initialized then return end
+    
+    self.logger:debug("Initializing GUI Manager")
+    
+    -- Create main GUI window
+    local MainWindow = require('gui.main')
+    self.windows.main = MainWindow.new(self.state, self.config, self.logger)
+    
+    -- === CRITICAL: REGISTER THE WINDOW WITH IMGUI ===
+    -- Store a STRONG reference to the main window. Use 'main_window' as a local.
+    local main_window = self.windows.main
+    
+    -- Create and register the render function
+    local render_func = function()
+        -- Directly use the captured 'main_window' variable, not self.windows.main
+        if main_window and main_window.render then
+            main_window:render()
+        end
     end
+    
+    ImGui.Register('LuaLooter_MainWindow', render_func)
+    print("[DEBUG] MainWindow registered with ImGui.")
+    -- ================================================
+    
+    self.initialized = true
+    self.logger:debug("GUI Manager initialized")
+  end
     
     function self:toggle()
         self.visible = not self.visible
@@ -60,18 +76,20 @@ function GUIManager.new(state, config, logger)
         return self.visible
     end
     
-    function self:render()
-        if not self.visible or not self.initialized then
-            return
-        end
-        
-        -- Render all windows
-        for _, window in pairs(self.windows) do
-            if window.render then
-                window:render()
-            end
+  function self:render()
+    if not self.visible or not self.initialized then
+        print("[MANAGER] render() SKIPPED. visible:", self.visible, "initialized:", self.initialized)
+        return
+    end
+
+    print("[MANAGER] render() called. Rendering windows...")
+    -- ... rest of your existing code to loop through windows ...
+    for _, window in pairs(self.windows) do
+        if window.render then
+            window:render()
         end
     end
+  end
     
     function self:shutdown()
         self.logger:debug("Shutting down GUI Manager")

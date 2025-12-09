@@ -107,11 +107,6 @@ function Main.new()
         -- Update state
         self.state.last_check = os.time()
         
-        -- Render GUI if visible (NEW)
-        if self.services.gui then
-            self.services.gui:render()
-        end
-        
         -- Check for loot
         local has_loot = mq.TLO.AdvLoot.SCount() > 0 or mq.TLO.AdvLoot.PCount() > 0
         
@@ -141,12 +136,7 @@ function Main.new()
     function self:shutdown()
         self.logger:info("Shutting down LuaLooter")
         self.running = false
-        
-        -- Shutdown GUI if available
-        if self.services.gui then
-            self.services.gui:shutdown()
-        end
-        
+                
         -- Unbind commands
         mq.unbind("/looter")
         mq.unbind("/ll")

@@ -23,30 +23,34 @@ function BaseWindow.new(title, state, config, logger)
         first_render = true
     }
     
-    function self:begin_window()
-        -- Set window position/size on first render
-        if self.first_render then
-            ImGui.SetNextWindowPos(self.position.x, self.position.y, ImGuiCond_FirstUseEver)
-            ImGui.SetNextWindowSize(self.size.width, self.size.height, ImGuiCond_FirstUseEver)
-            self.first_render = false
-        end
-        
-        -- Begin the window
-        self.open, self.open = ImGui.Begin(self.title, self.open, self.flags)
-        return self.open
+
+  function self:begin_window()
+    -- Set window position/size on first render
+    if self.first_render then
+        ImGui.SetNextWindowPos(self.position.x, self.position.y, ImGuiCond_FirstUseEver)
+        ImGui.SetNextWindowSize(self.size.width, self.size.height, ImGuiCond_FirstUseEver)
+        self.first_render = false
     end
     
-    function self:end_window()
-        ImGui.End()
+    -- Begin the window - CRITICAL: Capture BOTH return values
+    local visible
+    self.open, visible = ImGui.Begin(self.title, self.open, self.flags)
+    return visible  -- Return whether window is visible/drawn this frame
+end
+
+function self:end_window()
+    ImGui.End()
+end
+
+function self:render()
+    -- Only render content if window is VISIBLE this frame
+    if self:begin_window() then
+        self:render_content()
+        self:end_window()
     end
-    
-    function self:render()
-        -- Override in derived classes
-        if self:begin_window() then
-            self:render_content()
-            self:end_window()
-        end
-    end
+    -- If begin_window() returns false (window minimized/not visible),
+    -- we do NOT call render_content() or end_window()
+end
     
     function self:render_content()
         -- Override in derived classes

@@ -29,21 +29,79 @@ function MainWindow.new(state, config, logger)
         rules = nil     -- Will be gui.rules_panel
     }
     
+    -- ============================================
+    -- SAFE LOG CAPTURE SYSTEM
+    -- ============================================
+    self.log_messages = {}
+    self.max_log_lines = 200
+    
+    -- Helper function to safely convert any message to string
+    local function safe_tostring(msg)
+        if msg == nil then
+            return "nil"
+        elseif type(msg) == "table" then
+            return "{table}" -- Simple representation for now
+        else
+            return tostring(msg)
+        end
+    end
+    
+    -- Helper to capture log messages safely
+    local function capture_log(original_fn, level, ...)
+        -- First, call the original logger
+        original_fn(...)
+        
+        -- Then capture for GUI
+        local msg_str = ""
+        local args = {...}
+        
+        -- Build message string from all arguments
+        for i, arg in ipairs(args) do
+            if i > 1 then msg_str = msg_str .. " " end
+            msg_str = msg_str .. safe_tostring(arg)
+        end
+        
+        table.insert(self.log_messages, os.date("%H:%M:%S") .. " [" .. level .. "] " .. msg_str)
+        
+        -- Trim if too long
+        if #self.log_messages > self.max_log_lines then
+            table.remove(self.log_messages, 1)
+        end
+    end
+    
+    -- Capture logger output SAFELY (using varargs ...)
+    local original_info = logger.info
+    logger.info = function(...)
+        capture_log(original_info, "INFO", ...)
+    end
+    
+    local original_debug = logger.debug
+    logger.debug = function(...)
+        capture_log(original_debug, "DEBUG", ...)
+    end
+    
+    local original_error = logger.error
+    logger.error = function(...)
+        capture_log(original_error, "ERROR", ...)
+    end
+    -- ============================================
+    
     -- Window settings
     self:set_size(900, 700)
     self:add_flag(ImGuiWindowFlags_MenuBar)
     
     function self:render_content()
-        -- Menu bar
+        -- === 1. MENU BAR ===
         if ImGui.BeginMenuBar() then
+            -- File Menu
             if ImGui.BeginMenu("File") then
                 if ImGui.MenuItem("Save Configuration") then
                     self.config:save()
-                    self.logger:info("Configuration saved")
+                    logger.info("Configuration saved") -- Use logger, not self.logger
                 end
                 if ImGui.MenuItem("Reload Configuration") then
                     self.config:load()
-                    self.logger:info("Configuration reloaded")
+                    logger.info("Configuration reloaded")
                 end
                 ImGui.Separator()
                 if ImGui.MenuItem("Exit") then
@@ -52,29 +110,30 @@ function MainWindow.new(state, config, logger)
                 ImGui.EndMenu()
             end
             
+            -- View Menu
             if ImGui.BeginMenu("View") then
                 if ImGui.MenuItem("Reset Window Position") then
                     self:set_position(100, 100)
-                    self.logger:debug("Window position reset")
+                    logger.debug("Window position reset")
                 end
                 if ImGui.MenuItem("Toggle Console Output", nil, self.config:get('show_messages_in_console')) then
                     local current = self.config:get('show_messages_in_console')
                     self.config:set('show_messages_in_console', not current)
-                    self.logger:info("Console output " .. (not current and "enabled" or "disabled"))
+                    logger.info("Console output " .. (not current and "enabled" or "disabled"))
                 end
                 ImGui.EndMenu()
             end
             
+            -- Help Menu
             if ImGui.BeginMenu("Help") then
                 if ImGui.MenuItem("About") then
-                    self.logger:info("LuaLooter v0.5.0 - Advanced Looting System")
+                    logger.info("LuaLooter v0.5.0 - Advanced Looting System")
                 end
                 ImGui.EndMenu()
             end
             
-            -- Status indicator
+            -- Status indicator (Right-aligned)
             ImGui.SameLine(ImGui.GetWindowWidth() - 150)
-            
             local status_text = self.state:is_enabled() and "ACTIVE" or "PAUSED"
             local r, g, b
             if self.state:is_enabled() then
@@ -87,10 +146,9 @@ function MainWindow.new(state, config, logger)
             ImGui.EndMenuBar()
         end
         
-        -- Tab bar with SAFE selected tab highlighting
+        -- === 2. TAB BAR ===
         if ImGui.BeginTabBar("MainTabs") then
             for _, tab in ipairs(self.tabs) do
-                -- SAFE Tweak: Check if the global flag exists, otherwise use 0.
                 local tab_flags = 0
                 if self.active_tab == tab.id and ImGuiTabItemFlags_SetSelected then
                     tab_flags = ImGuiTabItemFlags_SetSelected
@@ -107,12 +165,21 @@ function MainWindow.new(state, config, logger)
     end
     
     function self:render_panel(tab_id)
-        -- This will be implemented as we create each panel
         ImGui.BeginChild("PanelContent", 0, 0, true)
         
         if tab_id == 1 then
-            ImGui.Text("Log Panel - Coming in Phase 2")
-            ImGui.Text("Real-time messages will appear here")
+            -- Log Panel with captured messages
+            ImGui.Text("Event Log (Last " .. self.max_log_lines .. " lines):")
+            ImGui.Separator()
+            ImGui.BeginChild("LogList", 0, 0, false, ImGuiWindowFlags_HorizontalScrollbar)
+            for _, msg in ipairs(self.log_messages) do
+                ImGui.TextWrapped(msg)
+            end
+            -- Auto-scroll to bottom
+            if ImGui.GetScrollY() >= ImGui.GetScrollMaxY() then
+                ImGui.SetScrollHereY(1.0)
+            end
+            ImGui.EndChild()
         elseif tab_id == 2 then
             ImGui.Text("Settings Panel - Coming in Phase 3")
             ImGui.Text("Character and system settings")
@@ -125,16 +192,12 @@ function MainWindow.new(state, config, logger)
     end
     
     function self:load_panels()
-        -- Load panel modules when they're created
-        -- This will be called during initialization
         if not self.panels.log then
             local success, panel = pcall(require, 'gui.log_panel')
             if success then
                 self.panels.log = panel.new(self.state, self.config, self.logger)
             end
         end
-        
-        -- Similar for other panels...
     end
     
     return self
