@@ -30,7 +30,7 @@ function MainWindow.new(state, config, logger)
     }
     
     -- ============================================
-    -- SAFE LOG CAPTURE SYSTEM
+    -- FIXED LOG CAPTURE SYSTEM (handles format strings AND tables)
     -- ============================================
     self.log_messages = {}
     self.max_log_lines = 200
@@ -40,25 +40,75 @@ function MainWindow.new(state, config, logger)
         if msg == nil then
             return "nil"
         elseif type(msg) == "table" then
-            return "{table}" -- Simple representation for now
+            -- Simple table representation
+            if next(msg) == nil then
+                return "{}"  -- Empty table
+            end
+            -- Try to show key-value pairs for small tables
+            local str = "{"
+            local count = 0
+            for k, v in pairs(msg) do
+                if count > 0 then str = str .. ", " end
+                if type(k) == "string" and not k:find(" ") then
+                    str = str .. k .. "=" .. safe_tostring(v)
+                else
+                    str = str .. safe_tostring(v)
+                end
+                count = count + 1
+                if count > 3 then  -- Limit to avoid huge strings
+                    str = str .. ", ..."
+                    break
+                end
+            end
+            return str .. "}"
+        elseif type(msg) == "boolean" then
+            return msg and "true" or "false"
+        elseif type(msg) == "number" then
+            return tostring(msg)
         else
             return tostring(msg)
         end
     end
     
-    -- Helper to capture log messages safely
+    -- Helper to capture log messages WITH FORMATTING and table handling
     local function capture_log(original_fn, level, ...)
-        -- First, call the original logger
+        -- Call original logger first
         original_fn(...)
         
-        -- Then capture for GUI
-        local msg_str = ""
         local args = {...}
+        local format_str = args[1]
+        local msg_str
         
-        -- Build message string from all arguments
-        for i, arg in ipairs(args) do
-            if i > 1 then msg_str = msg_str .. " " end
-            msg_str = msg_str .. safe_tostring(arg)
+        if type(format_str) == "string" and #args > 1 and format_str:find("%%") then
+            -- We have a format string with arguments
+            local format_args = {}
+            for i = 2, #args do
+                -- Convert args to strings for string.format
+                if type(args[i]) == "table" then
+                    table.insert(format_args, safe_tostring(args[i]))
+                else
+                    table.insert(format_args, args[i])
+                end
+            end
+            
+            local success, result = pcall(string.format, format_str, unpack(format_args))
+            if success then
+                msg_str = result
+            else
+                -- Fallback: convert all args to strings and join
+                local str_parts = {}
+                for i, arg in ipairs(args) do
+                    table.insert(str_parts, safe_tostring(arg))
+                end
+                msg_str = table.concat(str_parts, " ")
+            end
+        else
+            -- No format string, convert all args to strings and join
+            local str_parts = {}
+            for i, arg in ipairs(args) do
+                table.insert(str_parts, safe_tostring(arg))
+            end
+            msg_str = table.concat(str_parts, " ")
         end
         
         table.insert(self.log_messages, os.date("%H:%M:%S") .. " [" .. level .. "] " .. msg_str)
@@ -69,7 +119,7 @@ function MainWindow.new(state, config, logger)
         end
     end
     
-    -- Capture logger output SAFELY (using varargs ...)
+    -- Capture logger output PROPERLY
     local original_info = logger.info
     logger.info = function(...)
         capture_log(original_info, "INFO", ...)
@@ -84,6 +134,14 @@ function MainWindow.new(state, config, logger)
     logger.error = function(...)
         capture_log(original_error, "ERROR", ...)
     end
+    
+    -- Optional: Capture warnings if your logger has them
+    local original_warn = logger.warn
+    if original_warn then
+        logger.warn = function(...)
+            capture_log(original_warn, "WARN", ...)
+        end
+    end
     -- ============================================
     
     -- Window settings
@@ -96,16 +154,17 @@ function MainWindow.new(state, config, logger)
             -- File Menu
             if ImGui.BeginMenu("File") then
                 if ImGui.MenuItem("Save Configuration") then
-                    self.config:save()
-                    logger.info("Configuration saved") -- Use logger, not self.logger
+                  self.config:save()
+                  logger.info("Configuration saved")
                 end
                 if ImGui.MenuItem("Reload Configuration") then
-                    self.config:load()
-                    logger.info("Configuration reloaded")
+                  self.config:load()
+                  logger.info("Configuration reloaded")
                 end
                 ImGui.Separator()
                 if ImGui.MenuItem("Exit") then
-                    self:close()
+                  self.state:set_gui_visible(false)
+                  self:close()
                 end
                 ImGui.EndMenu()
             end

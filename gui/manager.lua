@@ -14,7 +14,6 @@ function GUIManager.new(state, config, logger)
         state = state,
         config = config,
         logger = logger,
-        visible = false,
         windows = {},
         initialized = false
     }
@@ -24,76 +23,72 @@ function GUIManager.new(state, config, logger)
     
     self.logger:debug("Initializing GUI Manager")
     
-    -- Create main GUI window
+    -- Create main window
     local MainWindow = require('gui.main')
     self.windows.main = MainWindow.new(self.state, self.config, self.logger)
     
-    -- === CRITICAL: REGISTER THE WINDOW WITH IMGUI ===
-    -- Store a STRONG reference to the main window. Use 'main_window' as a local.
+    -- Create wrapper
     local main_window = self.windows.main
     
-    -- Create and register the render function
     local render_func = function()
-        -- Directly use the captured 'main_window' variable, not self.windows.main
-        if main_window and main_window.render then
-            main_window:render()
+        -- Only render if GUI should be visible
+        if self.state:is_gui_visible() then
+            if main_window and main_window.render then
+                main_window:render()
+            end
         end
+        -- If not visible, do nothing (function still called by MQ)
     end
     
     ImGui.Register('LuaLooter_MainWindow', render_func)
-    print("[DEBUG] MainWindow registered with ImGui.")
-    -- ================================================
-    
-    self.initialized = true
+    self.state.set_initalized(true)
     self.logger:debug("GUI Manager initialized")
-  end
+end
     
-    function self:toggle()
-        self.visible = not self.visible
-        if self.visible and not self.initialized then
+  function self:toggle()
+    local new_visibility = not self.state:is_gui_visible()
+    self.state:set_gui_visible(new_visibility)
+    
+    if new_visibility then
+        -- If showing, ensure window is initialized and open
+        if not self.state.initialized then
             self:init()
         end
-        
-        local action = self.visible and "shown" or "hidden"
-        self.logger:info("GUI %s", action)
-        return self.visible
+        if self.windows.main then
+            self.windows.main.open = true  -- Reopen the window
+        end
+        self.logger:info("GUI shown")
+    else
+        -- If hiding, close the window
+        if self.windows.main then
+            self.windows.main.open = false
+        end
+        self.logger:info("GUI hidden")
     end
+    
+    return new_visibility
+  end
     
     function self:show()
         if not self.initialized then
             self:init()
         end
-        self.visible = true
+        self.state:set_gui_visible(true)
         self.logger:debug("GUI shown")
     end
     
     function self:hide()
-        self.visible = false
+        self.state:set_gui_visible(false)
         self.logger:debug("GUI hidden")
     end
     
     function self:is_visible()
-        return self.visible
-    end
-    
-  function self:render()
-    if not self.visible or not self.initialized then
-        print("[MANAGER] render() SKIPPED. visible:", self.visible, "initialized:", self.initialized)
-        return
+        return self.state:is_gui_visible()
     end
 
-    print("[MANAGER] render() called. Rendering windows...")
-    -- ... rest of your existing code to loop through windows ...
-    for _, window in pairs(self.windows) do
-        if window.render then
-            window:render()
-        end
-    end
-  end
-    
     function self:shutdown()
         self.logger:debug("Shutting down GUI Manager")
-        self.visible = false
+        self.state:set_gui_visible(false)
         self.windows = {}
         self.initialized = false
     end

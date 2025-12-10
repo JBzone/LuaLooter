@@ -19,7 +19,7 @@ function ProfitService.new(state, config, logger, events)
         value_looted = 0,
         cash_looted = 0,
         
-        -- NEW: Expanded tracking
+        -- Expanded tracking
         items_destroyed_value = 0,
         items_by_name = {},        -- {item_name = {count = X, total_value = Y, destroyed = Z, passed = A, left = B}}
         items_passed = {},
@@ -47,12 +47,6 @@ function ProfitService.new(state, config, logger, events)
         
         if total > 0 then
             self.cash_looted = self.cash_looted + total
-            self.events:publish(self.events.EVENT_TYPES.CASH_LOOTED, {
-                amount = total,
-                breakdown = {plat = p, gold = g, silver = s, copper = c},
-                total = self.cash_looted
-            })
-            
             self.logger:info("Cash loot: +%s (Total: %s)", 
                 format_money(total), format_money(self.cash_looted))
         end
@@ -76,18 +70,10 @@ function ProfitService.new(state, config, logger, events)
             self.items_by_name[item_name].count = self.items_by_name[item_name].count + 1
             self.items_by_name[item_name].total_value = self.items_by_name[item_name].total_value + value
             
-            self.events:publish(self.events.EVENT_TYPES.LOOT_ITEM, {
-                name = item_name,
-                value = value,
-                items_total = self.items_looted,
-                value_total = self.value_looted
-            })
-            
             self.logger:info("Profit: %s (+%s)", item_name, format_money(value))
         end
     end
     
-    -- NEW: Track destroyed item
     function self:track_item_destroyed(item_name, value)
         if value and value > 0 then
             self.items_destroyed_value = self.items_destroyed_value + value
@@ -104,17 +90,10 @@ function ProfitService.new(state, config, logger, events)
             end
             self.items_by_name[item_name].destroyed = (self.items_by_name[item_name].destroyed or 0) + 1
             
-            self.events:publish(self.events.EVENT_TYPES.ITEM_DESTROYED, {
-                name = item_name,
-                value = value,
-                destroyed_total = self.items_destroyed_value
-            })
-            
             self.logger:info("Destroyed: %s (-%s)", item_name, format_money(value))
         end
     end
     
-    -- NEW: Track passed item
     function self:track_item_passed(item_name)
         self.items_passed[item_name] = (self.items_passed[item_name] or 0) + 1
         
@@ -130,15 +109,9 @@ function ProfitService.new(state, config, logger, events)
         end
         self.items_by_name[item_name].passed = (self.items_by_name[item_name].passed or 0) + 1
         
-        self.events:publish(self.events.EVENT_TYPES.ITEM_PASSED, {
-            name = item_name,
-            passed_total = self.items_passed[item_name]
-        })
-        
         self.logger:info("Passed: %s", item_name)
     end
     
-    -- NEW: Track left item
     function self:track_item_left(item_name)
         self.items_left[item_name] = (self.items_left[item_name] or 0) + 1
         
@@ -153,11 +126,6 @@ function ProfitService.new(state, config, logger, events)
             }
         end
         self.items_by_name[item_name].left = (self.items_by_name[item_name].left or 0) + 1
-        
-        self.events:publish(self.events.EVENT_TYPES.ITEM_LEFT, {
-            name = item_name,
-            left_total = self.items_left[item_name]
-        })
         
         self.logger:info("Left: %s", item_name)
     end
@@ -320,22 +288,26 @@ function ProfitService.new(state, config, logger, events)
         end
     end
     
-    -- NEW: Register event handlers
+    -- Register event handlers
     function self:register_event_handlers()
         self.events:subscribe(self.events.EVENT_TYPES.ITEM_LOOTED, function(data)
-            self:track_item(data.item_name, data.value)
+            self:track_item(data.name, data.value)
+        end)
+        
+        self.events:subscribe(self.events.EVENT_TYPES.CASH_LOOTED, function(data)
+            self:track_cash(data.plat, data.gold, data.silver, data.copper)
         end)
         
         self.events:subscribe(self.events.EVENT_TYPES.ITEM_DESTROYED, function(data)
-            self:track_item_destroyed(data.item_name, data.value)
+            self:track_item_destroyed(data.name, data.value)
         end)
         
         self.events:subscribe(self.events.EVENT_TYPES.ITEM_PASSED, function(data)
-            self:track_item_passed(data.item_name)
+            self:track_item_passed(data.name)
         end)
         
         self.events:subscribe(self.events.EVENT_TYPES.ITEM_LEFT, function(data)
-            self:track_item_left(data.item_name)
+            self:track_item_left(data.name)
         end)
     end
     

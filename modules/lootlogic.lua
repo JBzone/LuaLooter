@@ -48,27 +48,6 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     function self:init_event_handlers()
         self.logger:debug("Initializing LootLogic event handlers")
         
-        -- Register loot completion events
-        mq.event("ItemLooted", "#*#You have looted a #*#", function()
-            self:handle_loot_complete()
-        end)
-        
-        mq.event("ItemLootedAn", "#*#You have looted an #*#", function()
-            self:handle_loot_complete()
-        end)
-        
-        mq.event("ItemDestroyed", "#*#You successfully destroyed #*#", function(line)
-            self:handle_destroy_complete(line)
-        end)
-        
-        mq.event("ItemPassed", "#*#You pass on #*#", function()
-            self:handle_action_complete()
-        end)
-        
-        mq.event("ItemLeft", "#*#You decide to leave #*#", function()
-            self:handle_action_complete()
-        end)
-        
         -- Subscribe to loot action events
         self.events:subscribe(self.events.EVENT_TYPES.LOOT_ACTION, function(data)
             self:execute_loot_action(data)

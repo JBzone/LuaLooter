@@ -18,7 +18,7 @@ function Main.new()
     
     -- Core systems (always loaded)
     self.logger = require('core.logger').new()
-    self.events = require('core.events').new()
+    self.events = require('core.events').new(self.logger)
     self.state = require('core.state').new()
     self.config = require('core.config').new(self.logger)
     
@@ -55,50 +55,14 @@ function Main.new()
         -- Bind commands
         mq.bind("/looter", function(cmd, arg) self.commands:handle(cmd, arg) end)
         mq.bind("/ll", function(cmd, arg) self.commands:handle(cmd, arg) end)
-        
-        -- Register events
-        self:register_events()
-        
+                
         self.logger:info("LuaLooter initialized successfully")
         self.logger:info("Mode: " .. (self.config.settings.alpha_mode and "ALPHA (log only)" or "PRODUCTION (looting active)"))
         if self.services.gui then
             self.logger:info("GUI: Available (use /ll gui)")
         end
     end
-    
-    function self:register_events()
-        -- Cash loot events
-        mq.event('CashLootPlatOnlyCorpse', '#*#You receive #1# platinum from the corpse.#*#', 
-            function(line, plat) self.services.profit:track_cash(plat or 0, 0, 0, 0) end)
         
-        mq.event('CashLootPlatGoldCorpse', '#*#You receive #1# platinum and #2# gold from the corpse.#*#', 
-            function(line, plat, gold) self.services.profit:track_cash(plat or 0, gold or 0, 0, 0) end)
-        
-        mq.event('CashLootPlatGoldSilverCorpse', '#*#You receive #1# platinum, #2# gold and #3# silver from the corpse.#*#', 
-            function(line, plat, gold, silver) self.services.profit:track_cash(plat or 0, gold or 0, silver or 0, 0) end)
-        
-        mq.event('CashLootPlatGoldSilverCopperCorpse', '#*#You receive #1# platinum, #2# gold, #3# silver and #4# copper from the corpse.#*#', 
-            function(line, plat, gold, silver, copper) self.services.profit:track_cash(plat or 0, gold or 0, silver or 0, copper or 0) end)
-        
-        -- Detect loot window close
-        mq.event('LootWindowClosed', '#*#Loot #window# has been closed#*#', function()
-            self.state:clear_processed_items()
-            if self.modules.logic then
-                self.modules.logic:clear_waiting_items()
-            end
-            self.logger:debug("Loot window closed, cleared processed and waiting items")
-        end)
-        
-        -- Detect zoning (window closes on zone)
-        mq.event('BeginZone', '#*#LOADING, PLEASE WAIT...#*#', function()
-            self.state:clear_processed_items()
-            if self.modules.logic then
-                self.modules.logic:clear_waiting_items()
-            end
-            self.logger:debug("Zoning, cleared processed and waiting items")
-        end)
-    end
-    
     function self:process()
         if not self.state.enabled or self.state.processing_loot then
             return

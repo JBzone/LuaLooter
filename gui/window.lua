@@ -16,41 +16,37 @@ function BaseWindow.new(title, state, config, logger)
         state = state,
         config = config,
         logger = logger,
-        open = true,
         flags = 0,
-        position = {x = 100, y = 100},
-        size = {width = 800, height = 600},
         first_render = true
     }
     
-
-  function self:begin_window()
+  function self:render()
     -- Set window position/size on first render
     if self.first_render then
-        ImGui.SetNextWindowPos(self.position.x, self.position.y, ImGuiCond_FirstUseEver)
-        ImGui.SetNextWindowSize(self.size.width, self.size.height, ImGuiCond_FirstUseEver)
+        local pos = self.state.settings.window.position
+        local size = self.state.settings.window.size
+        ImGui.SetNextWindowPos(pos.x, pos.y, ImGuiCond_FirstUseEver)
+        ImGui.SetNextWindowSize(size.width, size.height, ImGuiCond_FirstUseEver)
         self.first_render = false
     end
     
-    -- Begin the window - CRITICAL: Capture BOTH return values
-    local visible
-    self.open, visible = ImGui.Begin(self.title, self.open, self.flags)
-    return visible  -- Return whether window is visible/drawn this frame
-end
-
-function self:end_window()
-    ImGui.End()
-end
-
-function self:render()
-    -- Only render content if window is VISIBLE this frame
-    if self:begin_window() then
-        self:render_content()
-        self:end_window()
+    -- BEST PRACTICE: Cache, single method call, clear intent
+    local should_show = self.state:is_gui_visible()
+    local window_open = ImGui.Begin(self.title, should_show, self.flags)
+    
+    -- Update state if window closed by user
+    if not window_open and should_show then
+        self.state:set_gui_visible(false)
     end
-    -- If begin_window() returns false (window minimized/not visible),
-    -- we do NOT call render_content() or end_window()
-end
+    
+    -- Render content if window is actually open
+    if window_open then
+        self:render_content()
+    end
+    
+    ImGui.End()
+    return window_open
+  end
     
     function self:render_content()
         -- Override in derived classes
@@ -58,12 +54,12 @@ end
     end
     
     function self:set_position(x, y)
-        self.position = {x = x, y = y}
+        self.state.position = {x = x, y = y}
         self.first_render = true
     end
     
     function self:set_size(width, height)
-        self.size = {width = width, height = height}
+        self.state.size = {width = width, height = height}
         self.first_render = true
     end
     
@@ -79,12 +75,12 @@ end
         self.flags = bit32.band(self.flags, bit32.bnot(flag))
     end
     
-    function self:is_open()
-        return self.open
+    function self:is_visible()
+        return self.state:is_gui_visible()
     end
     
     function self:close()
-        self.open = false
+        self.state:set_gui_visible(false)
     end
     
     return self

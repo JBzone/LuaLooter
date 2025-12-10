@@ -37,7 +37,11 @@ function State.new()
         gui = {
             visible = false,
             active_tab = "loot",
-            settings = {}
+            initialized = false,
+            settings = {  window = {  position = { x = 100, y = 100 }, 
+                                      size = { width = 800, height = 600 }
+                                   }
+                       }
         },
         
         -- Module enable/disable state
@@ -113,6 +117,35 @@ function State.new()
         return string.format("%dpp %dgp %dsp %dcp", plat, gold, silver, copper)
     end
     
+    -- GUI visibility getters/setters
+    function self:set_gui_visible(visible) 
+        self.gui.visible = visible 
+        return self
+    end
+    
+    function self:is_gui_visible() 
+        return self.gui.visible 
+    end
+    
+    -- Optional: GUI tab management
+    function self:set_gui_tab(tab_name)
+        self.gui.active_tab = tab_name
+        return self
+    end
+    
+    function self:get_gui_tab()
+        return self.gui.active_tab
+    end
+    
+    function self:set_initalized(value)
+        self.gui.initialized = value
+        return self
+    end
+
+    function self:is_initialized()
+        return self.gui.initialized
+    end
+
     -- Profit stats setters (UPDATED)
     function self:add_item_value(item_name, value)
         if value and value > 0 then
