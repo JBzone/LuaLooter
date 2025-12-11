@@ -1,0 +1,6 @@
+.vscode/
+*.luac
+*.cache
+.DS_Store
+node_modules/
+.env

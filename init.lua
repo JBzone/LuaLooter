@@ -8,9 +8,9 @@ local mq = require('mq')
 
 -- Check for required TLOs
 if not mq.TLO.AdvLoot then
-    print("\arERROR: MQ2AdvLoot plugin not loaded!")
-    print("\arPlease load plugin with: /plugin mq2advloot")
-    return
+  print("\arERROR: MQ2AdvLoot plugin not loaded!")
+  print("\arPlease load plugin with: /plugin mq2advloot")
+  return
 end
 
 -- Load and run the main looter
