@@ -18,25 +18,103 @@ function CommandHandler.new(state, config, logger, events, services)
     commands = {}
   }
 
-  -- Helper function for boolean toggles
-  local function parse_bool_arg(arg, current_value)
-    if arg == "" or arg == "on" or arg == "true" or arg == "1" then
-      return true
-    elseif arg == "off" or arg == "false" or arg == "0" then
-      return false
-    else
-      -- Toggle if no specific value given
-      return not current_value
+  -- ===== ENHANCED VALIDATION HELPERS =====
+  local function validate_number(arg, min, max, default, show_warning)
+    -- Handle nil/empty
+    if arg == nil or arg == "" then
+      return default, false
     end
+    
+    local num = tonumber(arg)
+    if not num then
+      -- Try to parse "1k", "2.5k", etc.
+      if arg:lower():match("%d+%.?%d*[km]?$") then
+        local number_part = arg:lower():match("(%d+%.?%d*)")
+        local suffix = arg:lower():match("[km]$")
+        num = tonumber(number_part)
+        if suffix == "k" then num = num * 1000 end
+        if suffix == "m" then num = num * 1000000 end
+      end
+    end
+    
+    if not num then
+      if show_warning then
+        return default, true
+      end
+      return default, false
+    end
+    
+    if min and num < min then
+      if show_warning then
+        return default, true
+      end
+      return default, false
+    end
+    
+    if max and num > max then
+      if show_warning then
+        return default, true
+      end
+      return default, false
+    end
+    
+    return num, false
   end
 
-  -- Helper function for numeric arguments
-  local function parse_numeric_arg(arg, default)
-    local num = tonumber(arg)
-    if num and num > 0 then
-      return num
+  local function validate_boolean(arg, default, show_warning)
+    -- Handle nil/empty
+    if arg == nil or arg == "" then
+      return default, false
     end
-    return default
+    
+    local lower = arg:lower()
+    if lower == "on" or lower == "true" or lower == "1" or lower == "yes" or lower == "enable" then
+      return true, false
+    elseif lower == "off" or lower == "false" or lower == "0" or lower == "no" or lower == "disable" then
+      return false, false
+    end
+    
+    if show_warning then
+      return default, true
+    end
+    
+    return default, false
+  end
+
+  local function validate_string(arg, allowed_values, default, show_warning)
+    -- Handle nil/empty
+    if arg == nil or arg == "" then
+      return default, false
+    end
+    
+    for _, allowed in ipairs(allowed_values) do
+      if arg:lower() == allowed:lower() then
+        return allowed, false
+      end
+    end
+    
+    if show_warning then
+      return default, true
+    end
+    
+    return default, false
+  end
+
+  -- ===== EXISTING HELPERS (KEEP FOR BACKWARD COMPATIBILITY) =====
+  local function parse_bool_arg(arg, current_value)
+    -- Use enhanced validator with toggle behavior
+    local result, warning = validate_boolean(arg, nil, false)
+    if result == nil then
+      -- No valid boolean found, toggle current value
+      return not current_value
+    end
+    return result
+  end
+
+  local function parse_numeric_arg(arg, default)
+    -- Use enhanced validator (no min/max constraints by default)
+    local value, warning = validate_number(arg, nil, nil, default, false)
+    return value
   end
 
   -- Register all commands
@@ -299,115 +377,194 @@ function CommandHandler.new(state, config, logger, events, services)
 
   function self:cmd_tradeskill(arg)
     local current = self.config.char_settings.AlwaysLootTradeskills
-    local new_value = parse_bool_arg(arg, current)
-
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      -- Invalid input, toggle instead
+      new_value = not current
+      self.logger:info("AlwaysLootTradeskills toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("AlwaysLootTradeskills: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.AlwaysLootTradeskills = new_value
     self.config:save()
-    self.logger:info("AlwaysLootTradeskills: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_cash(arg)
     local current = self.config.char_settings.AutoLootCash
-    local new_value = parse_bool_arg(arg, current)
-
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("AutoLootCash toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("AutoLootCash: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.AutoLootCash = new_value
     self.config:save()
-    self.logger:info("AutoLootCash: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_quest(arg)
     local current = self.config.char_settings.AutoLootQuest
-    local new_value = parse_bool_arg(arg, current)
-
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("AutoLootQuest toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("AutoLootQuest: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.AutoLootQuest = new_value
     self.config:save()
-    self.logger:info("AutoLootQuest: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_collectible(arg)
     local current = self.config.char_settings.AutoLootCollectible
-    local new_value = parse_bool_arg(arg, current)
-
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("AutoLootCollectible toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("AutoLootCollectible: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.AutoLootCollectible = new_value
     self.config:save()
-    self.logger:info("AutoLootCollectible: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_lootvalue(arg)
-    local value = parse_numeric_arg(arg, 1000)
-
+    local current = self.config.char_settings.LootValue or 1000
+    local value, warning = validate_number(arg, 0, 1000000, current, true)
+    
+    if warning and arg and arg ~= "" then
+      self.logger:warn("Invalid LootValue: %s. Keeping current: %d", arg, current)
+      return
+    end
+    
     self.config.char_settings.LootValue = value
     self.config:save()
     self.logger:info("LootValue set to: %d copper", value)
   end
 
   function self:cmd_questvalue(arg)
-    local value = parse_numeric_arg(arg, 500)
-
+    local current = self.config.char_settings.QuestLootValue or 500
+    local value, warning = validate_number(arg, 0, 1000000, current, true)
+    
+    if warning and arg and arg ~= "" then
+      self.logger:warn("Invalid QuestLootValue: %s. Keeping current: %d", arg, current)
+      return
+    end
+    
     self.config.char_settings.QuestLootValue = value
     self.config:save()
     self.logger:info("QuestLootValue set to: %d copper", value)
   end
 
   function self:cmd_saveslots(arg)
-    local slots = parse_numeric_arg(arg, 3)
-
+    local current = self.config.char_settings.SaveSlots or 3
+    local slots, warning = validate_number(arg, 0, 10, current, true)
+    
+    if warning and arg and arg ~= "" then
+      self.logger:warn("Invalid SaveSlots: %s. Must be 0-10. Keeping current: %d", arg, current)
+      return
+    end
+    
     self.config.char_settings.SaveSlots = slots
     self.config:save()
     self.logger:info("SaveSlots set to: %d", slots)
   end
 
   function self:cmd_autowindow(arg)
-    local current = self.config.settings.auto_open_window
-    local new_value = parse_bool_arg(arg, current)
-
+    local current = self.config.settings.auto_open_window or true
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("Auto-open window toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("Auto-open window: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.settings.auto_open_window = new_value
     self.config:save()
-    self.logger:info("Auto-open window: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_nodropwait(arg)
-    local seconds = parse_numeric_arg(arg, 300)
-
+    local current = self.config.settings.no_drop_wait_time or 300
+    local seconds, warning = validate_number(arg, 60, 3600, current, true)
+    
+    if warning and arg and arg ~= "" then
+      self.logger:warn("Invalid wait time: %s. Must be 60-3600 seconds. Keeping current: %d", arg, current)
+      return
+    end
+    
     self.config.settings.no_drop_wait_time = seconds
     self.config:save()
     self.logger:info("No-drop wait time set to: %d seconds", seconds)
   end
 
   function self:cmd_masterloot(arg)
-    local current = self.config.char_settings.MasterLoot
-    local new_value = parse_bool_arg(arg, current)
-
+    local current = self.config.char_settings.MasterLoot or true
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("MasterLoot toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("MasterLoot: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.MasterLoot = new_value
     self.config:save()
-    self.logger:info("MasterLoot: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_loottrash(arg)
-    local current = self.config.char_settings.LootTrash
-    local new_value = parse_bool_arg(arg, current)
-
+    local current = self.config.char_settings.LootTrash or false
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("LootTrash toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("LootTrash: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.LootTrash = new_value
     self.config:save()
-    self.logger:info("LootTrash: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_lootpersonalmode(arg)
-    local current = self.config.char_settings.LootPersonalOnly
-    local new_value = parse_bool_arg(arg, current)
-
+    local current = self.config.char_settings.LootPersonalOnly or false
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("LootPersonalOnly toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("LootPersonalOnly: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.LootPersonalOnly = new_value
     self.config:save()
-    self.logger:info("LootPersonalOnly: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   function self:cmd_lootfromgeneral(arg)
-    local current = self.config.char_settings.LootFromGeneralSection
-    local new_value = parse_bool_arg(arg, current)
-
+    local current = self.config.char_settings.LootFromGeneralSection or true
+    local new_value, warning = validate_boolean(arg, current, true)
+    
+    if warning and arg and arg ~= "" then
+      new_value = not current
+      self.logger:info("LootFromGeneralSection toggled to: %s", new_value and "ENABLED" or "DISABLED")
+    elseif not warning and arg and arg ~= "" then
+      self.logger:info("LootFromGeneralSection: %s", new_value and "ENABLED" or "DISABLED")
+    end
+    
     self.config.char_settings.LootFromGeneralSection = new_value
     self.config:save()
-    self.logger:info("LootFromGeneralSection: %s", new_value and "ENABLED" or "DISABLED")
   end
 
   -- === ADDITIONAL COMMANDS ===
@@ -439,58 +596,86 @@ function CommandHandler.new(state, config, logger, events, services)
     self.logger:info("INI Configuration: Supported")
   end
 
-  -- Logging commands
+  -- === LOGGING COMMANDS ===
+  
   function self:cmd_log(arg)
     local parts = {}
-    for part in string.gmatch(arg, "[^%s]+") do
+    for part in string.gmatch(arg or "", "[^%s]+") do
       table.insert(parts, part)
     end
-
-    if #parts == 0 then
-      self.logger:info("=== Logging Commands ===")
-      self.logger:info("/ll log verbosity [0-5]  - Set verbosity level")
-      self.logger:info("  0=FATAL only, 1=ERROR+, 2=WARN+, 3=INFO+ (default)")
-      self.logger:info("  4=DEBUG+, 5=TRACE+ (everything)")
-      self.logger:info("/ll log console [on/off] - Toggle console output")
-      self.logger:info("/ll log gui [on/off]     - Toggle GUI output")
-      self.logger:info("/ll log smart [on/off]   - Toggle smart routing")
-      self.logger:info("/ll log stats            - Show logger statistics")
-      self.logger:info("/ll log test             - Test all log levels")
+    
+    -- Safe table check
+    if type(parts) ~= "table" or #parts == 0 then
+      self:show_log_help()
       return
     end
-
+    
     local subcmd = parts[1]:lower()
-
-    if subcmd == "verbosity" and parts[2] then
-      local level = tonumber(parts[2])
-      if level and level >= 0 and level <= 5 then
-        self.logger:set_verbosity(level)
-        self.config:set('log_verbosity', level)
-        self.config:save()
-        self.logger:info("Verbosity set to %d", level)
-      else
-        self.logger:error("Verbosity must be 0-5")
+    
+    if subcmd == "verbosity" then
+      local current = self.config:get('log_verbosity') or 3
+      local level, warning = validate_number(parts[2], 0, 5, current, true)
+      
+      if warning and parts[2] and parts[2] ~= "" then
+        self.logger:warn("Invalid verbosity: %s. Must be 0-5. Keeping current: %d", parts[2], current)
+        return
       end
+      
+      self.logger:set_verbosity(level)
+      self.config:set('log_verbosity', level)
+      self.config:save()
+      self.logger:info("Verbosity set to %d", level)
+      
     elseif subcmd == "console" then
-      local enabled = #parts < 2 or parts[2] ~= "off"
+      local current = self.logger.config.console_enabled
+      local enabled, warning = validate_boolean(parts[2], current, false)
+      
+      if warning and parts[2] and parts[2] ~= "" then
+        -- Toggle on invalid input
+        enabled = not current
+      elseif not parts[2] or parts[2] == "" then
+        -- Toggle on empty input
+        enabled = not current
+      end
+      
       self.logger:set_console_enabled(enabled)
       self.config:set('log_console_enabled', enabled)
       self.config:save()
       self.logger:info("Console logging %s", enabled and "enabled" or "disabled")
+      
     elseif subcmd == "gui" then
-      local enabled = #parts < 2 or parts[2] ~= "off"
+      local current = self.logger.config.gui_enabled
+      local enabled, warning = validate_boolean(parts[2], current, false)
+      
+      if warning and parts[2] and parts[2] ~= "" then
+        enabled = not current
+      elseif not parts[2] or parts[2] == "" then
+        enabled = not current
+      end
+      
       self.logger:set_gui_enabled(enabled)
       self.config:set('log_gui_enabled', enabled)
       self.config:save()
       self.logger:info("GUI logging %s", enabled and "enabled" or "disabled")
+      
     elseif subcmd == "smart" then
-      local enabled = #parts < 2 or parts[2] ~= "off"
+      local current = self.logger.config.smart_routing
+      local enabled, warning = validate_boolean(parts[2], current, false)
+      
+      if warning and parts[2] and parts[2] ~= "" then
+        enabled = not current
+      elseif not parts[2] or parts[2] == "" then
+        enabled = not current
+      end
+      
       self.logger:set_smart_routing(enabled)
       self.config:set('log_smart_routing', enabled)
       self.config:save()
       self.logger:info("Smart routing %s", enabled and "enabled" or "disabled")
+      
     elseif subcmd == "stats" then
       self.logger:log_stats()
+      
     elseif subcmd == "test" then
       self.logger:info("=== Testing Log Levels ===")
       self.logger:fatal("FATAL message (level 0)")
@@ -500,10 +685,23 @@ function CommandHandler.new(state, config, logger, events, services)
       self.logger:debug("DEBUG message (level 4)")
       self.logger:trace("TRACE message (level 5)")
       self.logger:info("Log test complete")
+      
     else
       self.logger:error("Unknown log command: %s", subcmd)
-      self.logger:info("Type '/ll log' for available commands")
+      self:show_log_help()
     end
+  end
+  
+  function self:show_log_help()
+    self.logger:info("=== Logging Commands ===")
+    self.logger:info("/ll log verbosity [0-5]  - Set verbosity level")
+    self.logger:info("  0=FATAL only, 1=ERROR+, 2=WARN+, 3=INFO+ (default)")
+    self.logger:info("  4=DEBUG+, 5=TRACE+ (everything)")
+    self.logger:info("/ll log console [on/off] - Toggle console output")
+    self.logger:info("/ll log gui [on/off]     - Toggle GUI output")
+    self.logger:info("/ll log smart [on/off]   - Toggle smart routing")
+    self.logger:info("/ll log stats            - Show logger statistics")
+    self.logger:info("/ll log test             - Test all log levels")
   end
 
   -- Initialize

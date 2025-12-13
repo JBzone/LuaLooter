@@ -20,10 +20,10 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
 
     -- Track processed items PER LOOT WINDOW SESSION
     current_session_id = nil,
-    processed_items = {},     -- item_name -> {session_id, processed_at, action}
+    processed_items = {}, -- item_name -> {session_id, processed_at, action}
 
     -- Cache for item decisions to avoid recalculation
-    decision_cache = {},     -- cache_key -> {action, expires_at}
+    decision_cache = {}, -- cache_key -> {action, expires_at}
 
     -- Store items that are waiting due to no-drop items with no rules
     waiting_items = {},
@@ -40,9 +40,28 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     waiting_for_loot = false,
     last_loot_time = 0,
     pending_loot_actions = {},
-    loot_delay = 1500,       -- 1.5 seconds between commands
-    loot_timeout = 5000,     -- 5 second timeout
+    loot_delay = 1500,   -- 1.5 seconds between commands
+    loot_timeout = 5000, -- 5 second timeout
   }
+
+  -- ============================================
+  -- FIXED: MQ2 TLO access - ALWAYS check if TLO exists
+  -- ============================================
+  local function safe_mq_tlo_access(tlo_path, default)
+    local parts = {}
+    for part in string.gmatch(tlo_path, "[^.]+") do
+      table.insert(parts, part)
+    end
+    
+    local current = mq
+    for _, part in ipairs(parts) do
+      current = current[part]
+      if not current then
+        return default
+      end
+    end
+    return current
+  end
 
   -- Initialize event handlers (FIXES RACE CONDITION)
   function self:init_event_handlers()
@@ -100,7 +119,10 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
   end
 
   function self:process_next_queued()
-    if #self.pending_loot_actions > 0 then
+    -- ============================================
+    -- FIXED: Check if table exists AND has items
+    -- ============================================
+    if type(self.pending_loot_actions) == "table" and #self.pending_loot_actions > 0 then
       mq.delay(500)
       local next_action = table.remove(self.pending_loot_actions, 1)
       self:execute_loot_action(next_action)
@@ -173,7 +195,11 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     if base_action == "KEEP" or base_action == "CASH" or base_action == "TRADESKILL" or
         base_action == "QUEST" or base_action == "SELL" then
       if is_shared then
-        command = string.format('/advloot shared %d giveto %s', index, mq.TLO.Me.Name())
+        -- ============================================
+        -- FIXED: Safe MQ2 TLO access
+        -- ============================================
+        local player_name = safe_mq_tlo_access("TLO.Me.Name", "Unknown")
+        command = string.format('/advloot shared %d giveto %s', index, player_name)
       else
         command = string.format('/advloot personal %d loot', index)
       end
@@ -251,7 +277,10 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
 
   -- Generate a unique session ID for current loot window
   function self:generate_session_id()
-    local npc_id = mq.TLO.Target.ID() or 0
+    -- ============================================
+    -- FIXED: Safe MQ2 TLO access
+    -- ============================================
+    local npc_id = safe_mq_tlo_access("TLO.Target.ID", 0)
     local timestamp = os.time()
     return string.format("session_%d_%d", npc_id, timestamp)
   end
@@ -261,7 +290,10 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     local session_id = self.current_session_id or "no_session"
     local filter_key = "no_filter"
 
-    if filter_actions and filter_actions[item_name] then
+    -- ============================================
+    -- FIXED: Check if table exists before accessing
+    -- ============================================
+    if type(filter_actions) == "table" and filter_actions[item_name] then
       local action = filter_actions[item_name].action
       filter_key = action:gsub("[^%w]", "_")
     end
@@ -301,10 +333,14 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
 
   -- Clean up old processed items to prevent memory bloat
   function self:cleanup_old_entries()
-    if #self.processed_items > 100 then
+    -- ============================================
+    -- FIXED: Use next() to check if table has items
+    -- # only works on array portions!
+    -- ============================================
+    if type(self.processed_items) == "table" and next(self.processed_items) then
       local count = 0
       local current_time = os.time()
-      local max_age = 3600       -- 1 hour
+      local max_age = 3600 -- 1 hour
 
       for item_name, data in pairs(self.processed_items) do
         if current_time - data.processed_at > max_age then
@@ -352,7 +388,12 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
       return
     end
 
-    local has_loot = mq.TLO.AdvLoot.SCount() > 0 or mq.TLO.AdvLoot.PCount() > 0
+    -- ============================================
+    -- FIXED: Safe MQ2 TLO access
+    -- ============================================
+    local shared_count = safe_mq_tlo_access("TLO.AdvLoot.SCount", 0)
+    local personal_count = safe_mq_tlo_access("TLO.AdvLoot.PCount", 0)
+    local has_loot = (shared_count or 0) > 0 or (personal_count or 0) > 0
 
     if has_loot then
       -- Generate new session ID if this is first loot detection
@@ -379,41 +420,59 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     end
 
     -- Log performance stats occasionally
-    if os.time() % 30 == 0 then     -- Every 30 seconds
+    if os.time() % 30 == 0 then -- Every 30 seconds
       self:log_performance_stats()
     end
   end
 
   local function is_master_looter()
+    -- ============================================
+    -- FIXED: Safe MQ2 TLO access with checks
+    -- ============================================
+    local me_id = safe_mq_tlo_access("TLO.Me.ID", 0)
+    
     -- 1. Check if we're in a group and are its master looter
-    if mq.TLO.Group and mq.TLO.Group.MasterLooter.ID() == mq.TLO.Me.ID() then
+    local group_ml = safe_mq_tlo_access("TLO.Group.MasterLooter.ID", 0)
+    if group_ml and group_ml == me_id then
       return true
     end
+    
     -- 2. Check if we're in a raid and are its master looter
-    if mq.TLO.Raid and mq.TLO.Raid.MasterLooter.ID() == mq.TLO.Me.ID() then
+    local raid_ml = safe_mq_tlo_access("TLO.Raid.MasterLooter.ID", 0)
+    if raid_ml and raid_ml == me_id then
       return true
     end
-    -- 3. Default: If we're not in a group AND not in a raid, we are the solo master looter.
-    if not mq.TLO.Group and not mq.TLO.Raid then
+    
+    -- 3. Check if we're NOT in a group AND NOT in a raid
+    local in_group = safe_mq_tlo_access("TLO.Group", nil)
+    local in_raid = safe_mq_tlo_access("TLO.Raid", nil)
+    if not in_group and not in_raid then
       return true
     end
-    -- 4. Otherwise, we are in a group/raid but are NOT the master looter.
+    
+    -- 4. Otherwise, we are in a group/raid but are NOT the master looter
     return false
   end
 
   -- OPTIMIZED: Process items with caching and session tracking
   function self:process_items_optimized(filter_actions)
     -- Process shared loot
-    local shared_count = mq.TLO.AdvLoot.SCount()
+    -- ============================================
+    -- FIXED: Safe MQ2 TLO access
+    -- ============================================
+    local shared_count = safe_mq_tlo_access("TLO.AdvLoot.SCount", 0)
     local is_master = is_master_looter()
 
-    if shared_count > 0 and is_master and self.config.char_settings.MasterLoot then
+    if shared_count and shared_count > 0 and is_master and self.config.char_settings.MasterLoot then
       self.logger:debug("Processing %d shared items in session %s",
         shared_count, self.current_session_id)
 
       for i = shared_count, 1, -1 do
-        local item = mq.TLO.AdvLoot.SList(i)
-        if item() then
+        -- ============================================
+        -- FIXED: Safe MQ2 TLO access
+        -- ============================================
+        local item = safe_mq_tlo_access(string.format("TLO.AdvLoot.SList(%d)", i), nil)
+        if item and item() then
           local name = item.Name()
           local skip = false
 
@@ -465,7 +524,7 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
               end
 
               self:mark_item_processed(name, action)
-              return true               -- Process one at a time
+              return true -- Process one at a time
             else
               -- Mark as processed even if no action (e.g., ASK)
               self:mark_item_processed(name, action or "NO_ACTION")
@@ -476,10 +535,13 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     end
 
     -- Process personal loot (similar optimization)
-    local personal_count = mq.TLO.AdvLoot.PCount()
+    -- ============================================
+    -- FIXED: Safe MQ2 TLO access
+    -- ============================================
+    local personal_count = safe_mq_tlo_access("TLO.AdvLoot.PCount", 0)
     for i = personal_count, 1, -1 do
-      local item = mq.TLO.AdvLoot.PList(i)
-      if item() then
+      local item = safe_mq_tlo_access(string.format("TLO.AdvLoot.PList(%d)", i), nil)
+      if item and item() then
         local name = item.Name()
         local skip = false
 
@@ -531,7 +593,7 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
             end
 
             self:mark_item_processed(name, action)
-            return true                 -- Process one at a time
+            return true -- Process one at a time
           else
             self:mark_item_processed(name, action or "NO_ACTION")
           end
@@ -548,7 +610,10 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     local now = os.time()
 
     -- Check cache first
-    if self.decision_cache[cache_key] then
+    -- ============================================
+    -- FIXED: Safe table access
+    -- ============================================
+    if type(self.decision_cache) == "table" and self.decision_cache[cache_key] then
       local cached = self.decision_cache[cache_key]
       if cached.expires_at > now then
         self.stats.cache_hits = self.stats.cache_hits + 1
@@ -566,6 +631,9 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
 
     -- Cache the decision (valid for 30 seconds)
     if action then
+      if not self.decision_cache then
+        self.decision_cache = {}
+      end
       self.decision_cache[cache_key] = {
         action = action,
         expires_at = now + 30
@@ -601,7 +669,10 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
     local item_link = item_info and item_info.link or nil
 
     -- PHASE 1: ADVANCED LOOT FILTER (Highest Priority)
-    if filter_actions and filter_actions[name] then
+    -- ============================================
+    -- FIXED: Safe table access
+    -- ============================================
+    if type(filter_actions) == "table" and filter_actions[name] then
       local filter_action = filter_actions[name]
       if filter_action.is_shared == is_shared and filter_action.index == index then
         local advloot_filter = filter_action.action
@@ -842,7 +913,7 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
 
   function self:start_waiting_period(item_name, reason)
     if not self.waiting_items[item_name] then
-      local wait_time = self.config.settings.no_drop_wait_time or 300       -- Default 5 minutes
+      local wait_time = self.config.settings.no_drop_wait_time or 300 -- Default 5 minutes
 
       self.logger:info("No-drop item %s (%s), starting %d second wait period",
         item_name, reason, wait_time)
@@ -864,42 +935,47 @@ function LootLogic.new(state, config, logger, events, item_service, filter_modul
   function self:check_waiting_items()
     local now = os.time()
 
-    for item_name, wait_data in pairs(self.waiting_items) do
-      local elapsed = now - wait_data.start_time
+    -- ============================================
+    -- FIXED: Use next() to safely iterate tables
+    -- ============================================
+    if type(self.waiting_items) == "table" and next(self.waiting_items) then
+      for item_name, wait_data in pairs(self.waiting_items) do
+        local elapsed = now - wait_data.start_time
 
-      if elapsed >= wait_data.wait_time then
-        self.logger:info("Wait period expired for %s (%d seconds). Item will be left on corpse.",
-          item_name, elapsed)
+        if elapsed >= wait_data.wait_time then
+          self.logger:info("Wait period expired for %s (%d seconds). Item will be left on corpse.",
+            item_name, elapsed)
 
-        -- Trigger leave action
-        self.events:publish(self.events.EVENT_TYPES.LOOT_ACTION, {
-          index = 0,           -- Unknown index
-          action = "LEAVE",
-          name = item_name,
-          info = {},
-          is_shared = true,
-          item_value = 0
-        })
+          -- Trigger leave action
+          self.events:publish(self.events.EVENT_TYPES.LOOT_ACTION, {
+            index = 0, -- Unknown index
+            action = "LEAVE",
+            name = item_name,
+            info = {},
+            is_shared = true,
+            item_value = 0
+          })
 
-        -- Remove from waiting list
-        self.waiting_items[item_name] = nil
+          -- Remove from waiting list
+          self.waiting_items[item_name] = nil
 
-        -- Publish event
-        self.events:publish(self.events.EVENT_TYPES.NO_DROP_WAIT_EXPIRED, {
-          item = item_name,
-          reason = wait_data.reason,
-          elapsed = elapsed,
-          action = "leave_on_corpse"
-        })
-      elseif elapsed >= wait_data.wait_time - 60 then       -- 1 minute warning
-        self.logger:debug("Item %s: %d seconds remaining in wait period",
-          item_name, wait_data.wait_time - elapsed)
+          -- Publish event
+          self.events:publish(self.events.EVENT_TYPES.NO_DROP_WAIT_EXPIRED, {
+            item = item_name,
+            reason = wait_data.reason,
+            elapsed = elapsed,
+            action = "leave_on_corpse"
+          })
+        elseif elapsed >= wait_data.wait_time - 60 then -- 1 minute warning
+          self.logger:debug("Item %s: %d seconds remaining in wait period",
+            item_name, wait_data.wait_time - elapsed)
+        end
       end
     end
   end
 
   function self:is_item_waiting(item_name)
-    return self.waiting_items[item_name] ~= nil
+    return type(self.waiting_items) == "table" and self.waiting_items[item_name] ~= nil
   end
 
   function self:clear_waiting_items()

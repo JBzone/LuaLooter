@@ -71,7 +71,7 @@ end
 -- Print contents of `tbl`, with indentation.
 -- `indent` sets the initial level of indentation.
 function tprint(tbl, indent)
-  if tbl ~= nil then
+  if type(tbl) == "table" and next(tbl) ~= nil then
     if not indent then indent = 0 end
     for k, v in ordered_pairs(tbl) do
       formatting = string.rep("  ", indent) .. k .. ": "
@@ -87,7 +87,7 @@ end
 
 function get_table_size(tbl)
   local cnt = 0
-  if tbl ~= nil then
+  if type(tbl) == "table" and next(tbl) ~= nil then
     for k, v in pairs(tbl) do cnt = cnt + 1 end
   end
   return cnt
