@@ -16,37 +16,50 @@ local mq = require('mq')
 local Logger = {}
 
 function Logger.new(events, config)
-  local self = {
-    -- Configuration (supports both old and new config)
-    config = {
-      -- Old settings (for backward compatibility)
-      current_level = 2,       -- Old debug=1, info=2, warn=3, error=4, fatal=5
-
-      -- New smart logging settings
-      verbosity = config and config.verbosity or 3,                       -- Default INFO
-      console_enabled = config and config.console_enabled ~= false,       -- Default true
-      gui_enabled = config and config.gui_enabled ~= false,               -- Default true
-      smart_routing = config and config.smart_routing ~= false,           -- Default true
-      max_gui_lines = config and config.max_gui_lines or 500
-    },
-
-    -- Runtime state
-    events = events,
-    gui_visible = false,
-    log_file = nil,
-    log_file_path = nil,
-
-    -- Callback for GUI to register log panel
-    gui_log_callback = nil,
-
-    -- Performance tracking
-    stats = {
-      messages_logged = 0,
-      messages_filtered = 0,
-      console_outputs = 0,
-      gui_outputs = 0
+  -- Try to create the self table with pcall
+  local self_table = {}
+  local success, err = pcall(function()
+    -- Copy your EXACT self initialization here
+    self_table = {
+      -- Configuration
+      config = {
+        -- Old settings
+        current_level = 2,
+        
+        -- New smart logging settings
+        verbosity = config and config.verbosity or 3,
+        console_enabled = config and config.console_enabled ~= false,
+        gui_enabled = config and config.gui_enabled ~= false,
+        smart_routing = config and config.smart_routing ~= false,
+        max_gui_lines = config and config.max_gui_lines or 500
+      },
+      
+      -- Runtime state (FIX THIS LINE!)
+      events = events,  -- NOT just "events = events"
+      
+      gui_visible = false,
+      log_file = nil,
+      log_file_path = nil,
+      gui_log_callback = nil,
+      
+      -- Performance tracking
+      stats = {
+        messages_logged = 0,
+        messages_filtered = 0,
+        console_outputs = 0,
+        gui_outputs = 0
+      }
     }
-  }
+  end)
+
+  local sub_success, sub_err = pcall(function()
+    events:subscribe(events.EVENT_TYPES.GUI_TOGGLE, function(data)
+      self_table.gui_visible = data.visible or false
+    end)
+  end)
+
+  -- Set self and continue with the rest of your function
+  local self = self_table
 
   -- Verbosity levels as per requirements (0-5) - NEW
   self.LEVELS = {
@@ -165,45 +178,102 @@ function Logger.new(events, config)
   end
 
   function self:format_message(level, msg, ...)
-    local formatted = string.format(msg, ...)
-    local timestamp = mq.TLO.Time() or "00:00:00"
-
-    -- Determine level name and color
-    local level_name, color_code
-
-    if type(level) == 'string' then
-      -- Old style
-      level_name = string.upper(level)
-      color_code = colors[level] or '\aw'
-    else
-      -- New style
-      level_name = self.LEVEL_NAMES[level] or "UNKNOWN"
-      color_code = colors[level] or '\aw'
-    end
-
-    -- For console: with colors
-    local console_msg = string.format('%s[%s] [LuaLooter] [%s] %s%s',
-      color_code,
-      timestamp,
-      level_name,
-      formatted,
-      reset)
-
-    -- For file: without colors (strip MQ color codes)
-    local file_msg = string.format('[%s] [LuaLooter] [%s] %s',
-      timestamp,
-      level_name,
-      formatted)
-
-    -- For GUI: structured data - NEW
-    local gui_data = {
-      text = string.format('[%s] [%s] %s', timestamp, level_name, formatted),
-      color = type(level) == 'number' and IMGUI_COLORS[level] or { 1.0, 1.0, 1.0, 1.0 },
-      level = type(level) == 'number' and level or 3,       -- Default to INFO
-      timestamp = os.time()
+    local args = {...}
+    local console_msg, file_msg, gui_msg
+    local timestamp = os.date("%H:%M:%S")
+    
+    -- Define level colors WITHOUT ImGui (just use RGB values)
+    local level_colors = {
+      debug = {0.0, 1.0, 0.0, 1.0},   -- Green
+      info = {1.0, 1.0, 1.0, 1.0},    -- White  
+      warn = {1.0, 1.0, 0.0, 1.0},    -- Yellow
+      error = {1.0, 0.0, 0.0, 1.0},   -- Red
+      fatal = {1.0, 0.0, 1.0, 1.0}    -- Magenta
     }
-
-    return console_msg, file_msg, gui_data
+    
+    local numeric_colors = {
+      [0] = {1.0, 0.0, 1.0, 1.0},  -- FATAL: Magenta
+      [1] = {1.0, 0.0, 0.0, 1.0},  -- ERROR: Red
+      [2] = {1.0, 1.0, 0.0, 1.0},  -- WARN: Yellow
+      [3] = {1.0, 1.0, 1.0, 1.0},  -- INFO: White
+      [4] = {0.0, 1.0, 0.0, 1.0},  -- DEBUG: Green
+      [5] = {0.5, 0.5, 1.0, 1.0}   -- TRACE: Blue
+    }
+    
+    local level_names = {
+      [0] = "FATAL",
+      [1] = "ERROR", 
+      [2] = "WARN",
+      [3] = "INFO",
+      [4] = "DEBUG",
+      [5] = "TRACE"
+    }
+    
+    -- Handle different level types
+    local level_str, level_color
+    if type(level) == "string" then
+      -- Old style: debug, info, error, warn
+      level_str = level:upper()
+      level_color = level_colors[level] or level_colors.info
+    else
+      -- New style: numeric levels 0-5
+      level_str = level_names[level] or "UNKNOWN"
+      level_color = numeric_colors[level] or level_colors.info
+    end
+    
+    -- Convert all arguments to strings safely
+    local safe_args = {}
+    for i, arg in ipairs(args) do
+      if type(arg) == "table" then
+        -- Try to convert table to string representation
+        if tostring(arg):match("table: ") then
+          safe_args[i] = tostring(arg)  -- Basic table representation
+        else
+          -- It might be a string that looks like a table
+          safe_args[i] = arg
+        end
+      elseif type(arg) == "function" then
+        safe_args[i] = tostring(arg)  -- Function address
+      elseif type(arg) == "nil" then
+        safe_args[i] = "nil"
+      else
+        safe_args[i] = arg
+      end
+    end
+    
+    -- Check if we have a format string with placeholders
+    if type(msg) == "string" and #safe_args > 0 and msg:find("%%") then
+      -- Try to format with the arguments
+      local success, result = pcall(string.format, msg, unpack(safe_args))
+      if success then
+        console_msg = string.format("[%s] [%s] %s", timestamp, level_str, result)
+        file_msg = string.format("%s [%s] %s", timestamp, level_str, result)
+        gui_msg = string.format("%s [%s] %s", timestamp, level_str, result)
+      else
+        -- Format failed, fall back to concatenation
+        local all_args = {msg, unpack(safe_args)}
+        local concat_msg = table.concat(all_args, " ")
+        console_msg = string.format("[%s] [%s] %s", timestamp, level_str, concat_msg)
+        file_msg = string.format("%s [%s] %s", timestamp, level_str, concat_msg)
+        gui_msg = string.format("%s [%s] %s", timestamp, level_str, concat_msg)
+      end
+    else
+      -- No formatting needed, msg might already be a formatted string or we have no extra args
+      local final_msg
+      if #safe_args > 0 then
+        -- Concatenate all arguments
+        local all_args = {msg, unpack(safe_args)}
+        final_msg = table.concat(all_args, " ")
+      else
+        final_msg = msg
+      end
+      
+      console_msg = string.format("[%s] [%s] %s", timestamp, level_str, final_msg)
+      file_msg = string.format("%s [%s] %s", timestamp, level_str, final_msg)
+      gui_msg = string.format("%s [%s] %s", timestamp, level_str, final_msg)
+    end
+    
+    return {console_msg, file_msg, gui_msg, level_color}
   end
 
   function self:set_log_file(path)
@@ -215,7 +285,6 @@ function Logger.new(events, config)
     if path then
       self.log_file, err = io.open(path, "a")
       if not self.log_file then
-        print(string.format('\ar[ERROR] Failed to open log file: %s - %s\ax', path, err))
         self.log_file_path = nil
         return false
       end
@@ -283,7 +352,6 @@ function Logger.new(events, config)
       end)
 
       if not status then
-        print(string.format('\ar[ERROR] Log file write failed: %s\ax', err))
         self.log_file = nil
         if self.log_file_path then
           self:set_log_file(self.log_file_path)
@@ -354,7 +422,7 @@ function Logger.new(events, config)
     -- Determine if this is old-style or new-style call
     local is_old_style = type(level) == 'string'
     local should_log
-
+    
     if is_old_style then
       -- Old style: check against current_level
       should_log = old_levels[level] and old_levels[level] >= self.config.current_level
@@ -362,21 +430,27 @@ function Logger.new(events, config)
       -- New style: check against verbosity (STRICT FILTERING AT SOURCE)
       should_log = level <= self.config.verbosity
     end
-
+    
     if not should_log then
       self.stats.messages_filtered = self.stats.messages_filtered + 1
-      return self       -- Return self for chaining
+      return self
     end
-
+    
     -- Only format message if it passes filter
     local formatted = self:format_message(level, msg, ...)
+    
+    if not formatted then
+      -- Create a safe fallback
+      formatted = { "FALLBACK", "FALLBACK", {} }
+    end
+    
     self:route_message(formatted, level, is_old_style)
-
+    
     -- Write to file if enabled
     if self.log_file then
       self:write_to_file(formatted[2])       -- file_msg is second return value
     end
-
+    
     return self     -- Method chaining support
   end
 
@@ -411,9 +485,10 @@ function Logger.new(events, config)
   -- ===== NEW SMART LOGGING METHODS =====
 
   function self:set_verbosity(level)
-    if level >= 0 and level <= 5 then
-      self.config.verbosity = level
-      self:info("Log verbosity set to %d (%s)", level, self.LEVEL_NAMES[level])
+    local level_num = tonumber(level) or 3
+    if level_num >= 0 and level_num <= 5 then
+      self.config.verbosity = level_num
+      self:info("Log verbosity set to %d (%s)", level_num, self.LEVEL_NAMES[level_num])
     end
     return self
   end

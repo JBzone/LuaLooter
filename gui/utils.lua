@@ -91,7 +91,7 @@ function GUIUtils.confirm_button(label, confirm_text, color)
   local center = ImGui.GetMainViewport():GetCenter()
   ImGui.SetNextWindowPos(center.x, center.y, ImGui.Cond.Appearing, ImGui.ImVec2(0.5, 0.5))
 
-  if ImGui.BeginPopupModal("ConfirmAction", nil, ImGui.WindowFlags.AlwaysAutoResize) then
+  if ImGui.BeginPopupModal("ConfirmAction", nil, ImGuiWindowFlags_AlwaysAutoResize) then
     ImGui.Text(confirm_text)
     ImGui.Separator()
 

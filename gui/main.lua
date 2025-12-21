@@ -86,24 +86,17 @@ function MainWindow.new(state, config, logger, events)
   end
 
   -- Helper to capture log messages WITH FORMATTING and table handling
-  local function capture_log(original_fn, level, ...)
-    -- Call original logger first
-    original_fn(...)
-
+  local function capture_log(level, ...)
     local args = { ... }
     local format_str = args[1]
     local msg_str
-
+  
     if type(format_str) == "string" and #args > 1 and format_str:find("%%") then
       local format_args = {}
       for i = 2, #args do
-        if type(args[i]) == "table" then
-          table.insert(format_args, safe_tostring(args[i]))
-        else
-          table.insert(format_args, args[i])
-        end
+        table.insert(format_args, safe_tostring(args[i]))
       end
-
+  
       local success, result = pcall(string.format, format_str, unpack(format_args))
       if success then
         msg_str = result
@@ -121,9 +114,20 @@ function MainWindow.new(state, config, logger, events)
       end
       msg_str = table.concat(str_parts, " ")
     end
-
-    table.insert(self.log_messages, os.date("%H:%M:%S") .. " [" .. level .. "] " .. msg_str)
-
+  
+    local log_entry = {
+      time = os.date("%H:%M:%S"),
+      level = level,  -- Use the parameter passed in
+      text = msg_str
+    }
+  
+    table.insert(self.log_messages, log_entry)
+    
+    -- Request scroll to bottom if auto-scroll is enabled
+    if self.log_panel_state.auto_scroll then
+      self.log_panel_state.scroll_to_bottom = true
+    end
+  
     -- Trim if too long
     if #self.log_messages > self.max_log_lines then
       table.remove(self.log_messages, 1)
@@ -132,32 +136,36 @@ function MainWindow.new(state, config, logger, events)
 
   -- Capture logger output PROPERLY (for backward compatibility)
   local original_info = logger.info
-  logger.info = function(...)
-    capture_log(original_info, "INFO", ...)
+  logger.info = function(self, ...)
+    original_info(self, ...)  -- Pass self to original logger
+    capture_log("INFO", ...)  -- Don't pass self to capture function
   end
 
   local original_debug = logger.debug
-  logger.debug = function(...)
-    capture_log(original_debug, "DEBUG", ...)
+  logger.debug = function(self, ...)  -- ADD 'self' parameter here!
+    original_debug(self, ...)  -- Pass self to original logger
+    capture_log("DEBUG", ...)
   end
 
   local original_error = logger.error
-  logger.error = function(...)
-    capture_log(original_error, "ERROR", ...)
+  logger.error = function(self, ...)  -- ADD 'self' parameter here!
+    original_error(self, ...)  -- Pass self to original logger
+    capture_log("ERROR", ...)
   end
 
   -- Optional: Capture warnings if your logger has them
   local original_warn = logger.warn
   if original_warn then
-    logger.warn = function(...)
-      capture_log(original_warn, "WARN", ...)
+    logger.warn = function(self, ...)  -- ADD 'self' parameter here!
+      original_warn(self, ...)  -- Pass self to original logger
+      capture_log("WARN", ...)
     end
   end
   -- ============================================
 
   -- Window settings
   self:set_size(1000, 800)
-  self:add_flag(ImGui.WindowFlags.MenuBar)
+  self:add_flag(ImGuiWindowFlags_HorizontalScrollbar)
 
   -- ===== NEW: Smart Logger Integration =====
 
@@ -177,56 +185,70 @@ function MainWindow.new(state, config, logger, events)
 
   -- Add smart log message to panel
   function self:add_smart_log_message(log_entry)
-    -- Add to message buffer
-    table.insert(self.log_messages, log_entry.text)
-
+    local level = log_entry.level or "INFO"  -- Use level if exists, default to "INFO"
+    local text = log_entry.text or log_entry  -- Handle both string and table
+    
+    local entry = {
+        time = os.date("%H:%M:%S"),
+        level = level,
+        text = text
+    }
+    
+    table.insert(self.log_messages, entry)
+    
     -- Trim if too many messages
     while #self.log_messages > self.max_log_lines do
       table.remove(self.log_messages, 1)
     end
-
-    -- Request scroll to bottom
-    self.log_panel_state.scroll_to_bottom = self.log_panel_state.auto_scroll
+    
+    -- Request scroll to bottom if auto-scroll is enabled
+    if self.log_panel_state.auto_scroll then
+      self.log_panel_state.scroll_to_bottom = true
+    end
   end
 
   -- Render enhanced log panel
   function self:render_log_panel()
     -- Log panel header with controls
     ImGui.SeparatorText("Event Log")
-
+  
     -- Controls row
     ImGui.BeginGroup()
-
-    -- Auto-scroll toggle
-    local changed, auto_scroll = ImGui.Checkbox("Auto-scroll", self.log_panel_state.auto_scroll)
-    if changed then
-      self.log_panel_state.auto_scroll = auto_scroll
-      self.config:set('log_auto_scroll', auto_scroll)
+  
+    -- Auto-scroll toggle (using IsItemClicked for immediate feedback)
+    ImGui.Checkbox("Auto-scroll", self.log_panel_state.auto_scroll)
+    if ImGui.IsItemClicked() then
+      -- Toggle the state
+      self.log_panel_state.auto_scroll = not self.log_panel_state.auto_scroll
+      self.config:set('log_auto_scroll', self.log_panel_state.auto_scroll)
       self.config:save()
+      self.logger:info("Auto-scroll %s", self.log_panel_state.auto_scroll and "enabled" or "disabled")
     end
-
+  
     ImGui.SameLine()
-
+  
     -- Timestamps toggle
-    local changed, show_ts = ImGui.Checkbox("Timestamps", self.log_panel_state.show_timestamps)
-    if changed then
-      self.log_panel_state.show_timestamps = show_ts
-      self.config:set('log_show_timestamps', show_ts)
+    ImGui.Checkbox("Timestamps", self.log_panel_state.show_timestamps)
+    if ImGui.IsItemClicked() then
+      self.log_panel_state.show_timestamps = not self.log_panel_state.show_timestamps
+      self.config:set('log_show_timestamps', self.log_panel_state.show_timestamps)
       self.config:save()
+      self.logger:info("Timestamps %s", self.log_panel_state.show_timestamps and "shown" or "hidden")
     end
-
+  
     ImGui.SameLine()
-
+  
     -- Levels toggle
-    local changed, show_lv = ImGui.Checkbox("Levels", self.log_panel_state.show_levels)
-    if changed then
-      self.log_panel_state.show_levels = show_lv
-      self.config:set('log_show_levels', show_lv)
+    ImGui.Checkbox("Levels", self.log_panel_state.show_levels)
+    if ImGui.IsItemClicked() then
+      self.log_panel_state.show_levels = not self.log_panel_state.show_levels
+      self.config:set('log_show_levels', self.log_panel_state.show_levels)
       self.config:save()
+      self.logger:info("Log levels %s", self.log_panel_state.show_levels and "shown" or "hidden")
     end
-
+  
     ImGui.SameLine()
-
+  
     -- Clear button
     if ImGui.Button("Clear Log") then
       self.log_messages = {}
@@ -236,191 +258,250 @@ function MainWindow.new(state, config, logger, events)
         logger:info("Log panel cleared")
       end
     end
-
+  
     ImGui.SameLine()
-
+  
     -- Copy to clipboard button
     if ImGui.Button("Copy to Clipboard") then
       self:copy_log_to_clipboard()
     end
-
+  
     ImGui.SameLine()
-
+  
     -- Stats button (only if smart logger is available)
     if self.smart_logger and ImGui.Button("Stats") then
       self.smart_logger:log_stats()
     end
-
+  
     ImGui.EndGroup()
-
+  
     -- Message count
     ImGui.SameLine(ImGui.GetWindowWidth() - 120)
     ImGui.TextDisabled(string.format("%d messages", #self.log_messages))
-
+  
     -- Log display area
     ImGui.Separator()
-
+  
     -- Begin child window for scrolling
-    ImGui.BeginChild("LogDisplay", 0, 0, true, ImGui.WindowFlags.HorizontalScrollbar)
-
+    ImGui.BeginChild("LogDisplay", 0, 0, true, ImGuiWindowFlags_HorizontalScrollbar)
+  
     -- Display messages
-    for _, msg in ipairs(self.log_messages) do
-      ImGui.TextWrapped(msg)
+    for _, entry in ipairs(self.log_messages) do
+      -- entry is now a TABLE, not a string
+      local display_text = ""
+      
+      -- Add timestamp if checkbox is checked
+      if self.log_panel_state.show_timestamps then
+          display_text = display_text .. "<" .. entry.time .. ">" .. " "
+      end
+      
+      -- Add level if checkbox is checked
+      if self.log_panel_state.show_levels then
+          display_text = display_text .. "[" .. entry.level .. "] "
+      end
+      
+      -- Add the actual message text
+      display_text = display_text .. entry.text
+      
+      ImGui.TextWrapped(display_text)
     end
-
-    -- Auto-scroll to bottom if requested
-    if self.log_panel_state.scroll_to_bottom then
-      ImGui.SetScrollHereY(1.0)
-      self.log_panel_state.scroll_to_bottom = false
+  
+    -- Auto-scroll to bottom if needed
+    if self.log_panel_state.scroll_to_bottom and self.log_panel_state.auto_scroll then
+      -- Scroll to the maximum Y position (bottom)
+      ImGui.SetScrollY(ImGui.GetScrollMaxY())
     end
-
+  
     ImGui.EndChild()
   end
 
   -- Render log settings panel (NEW)
   function self:render_log_settings_panel()
     ImGui.SeparatorText("Logging Configuration")
-
-    -- Verbosity level slider
-    local verbosity = self.config:get('log_verbosity') or 3
+    
+    -- Initialize temp_settings if not exists
+    if not self.temp_settings then
+      self.temp_settings = {
+        verbosity = tonumber(self.config:get('log_verbosity')) or 3,
+        max_lines = tonumber(self.config:get('max_log_lines')) or 500,
+        console_enabled = self.config:get('log_console_enabled') ~= false,
+        gui_enabled = self.config:get('log_gui_enabled') ~= false,
+        smart_routing = self.config:get('log_smart_routing') ~= false
+      }
+    end
+  
+    -- === VERBOSITY SLIDER ===
     ImGui.Text("Verbosity Level:")
     ImGui.SameLine()
     ImGui.TextDisabled("(?)")
     if ImGui.IsItemHovered() then
-      ImGui.BeginTooltip()
-      ImGui.PushTextWrapPos(ImGui.GetFontSize() * 35.0)
-      ImGui.Text(
-      "0=FATAL only (system crashing)\n1=ERROR and above (critical)\n2=WARN and above (important)\n3=INFO and above (normal)\n4=DEBUG and above (debugging)\n5=TRACE and above (everything)")
-      ImGui.PopTextWrapPos()
-      ImGui.EndTooltip()
+        ImGui.BeginTooltip()
+        ImGui.PushTextWrapPos(ImGui.GetFontSize() * 35.0)
+        ImGui.Text("0=FATAL only (system crashing)\n1=ERROR and above (critical)\n2=WARN and above (important)\n3=INFO and above (normal)\n4=DEBUG and above (debugging)\n5=TRACE and above (everything)")
+        ImGui.PopTextWrapPos()
+        ImGui.EndTooltip()
     end
 
-    local changed, new_verbosity = ImGui.SliderInt("##verbosity", verbosity, 0, 5)
-    if changed then
-      self.config:set('log_verbosity', new_verbosity)
-      if self.smart_logger then
-        self.smart_logger:set_verbosity(new_verbosity)
-      end
-      logger:info("Verbosity set to %d", new_verbosity)
-    end
+    self.temp_settings.verbosity = ImGui.SliderInt("##verbosity_slider", self.temp_settings.verbosity, 0, 5)
 
-    -- Show current verbosity description
+    -- Show description (using the potentially updated value)
     local level_names = {
-      [0] = "FATAL only (system crashing)",
-      [1] = "ERROR and above (critical)",
-      [2] = "WARN and above (important)",
-      [3] = "INFO and above (normal)",
-      [4] = "DEBUG and above (debugging)",
-      [5] = "TRACE and above (everything)"
+        [0] = "FATAL only (system crashing)",
+        [1] = "ERROR and above (critical)",
+        [2] = "WARN and above (important)",
+        [3] = "INFO and above (normal)",
+        [4] = "DEBUG and above (debugging)",
+        [5] = "TRACE and above (everything)"
     }
-    ImGui.TextDisabled("Current: " .. (level_names[verbosity] or "Unknown"))
-
+    ImGui.TextDisabled("Current: " .. (level_names[current_verbosity] or "Unknown"))
+  
     ImGui.Spacing()
     ImGui.Separator()
     ImGui.Spacing()
-
-    -- Output destinations
+  
+    -- === OUTPUT DESTINATIONS ===
     ImGui.Text("Output Destinations:")
-
-    local console_enabled = self.config:get('log_console_enabled') ~= false
-    local changed, new_console = ImGui.Checkbox("Console Output", console_enabled)
-    if changed then
-      self.config:set('log_console_enabled', new_console)
-      if self.smart_logger then
-        self.smart_logger:set_console_enabled(new_console)
-      end
-      logger:info("Console output %s", new_console and "enabled" or "disabled")
+  
+    -- Console output checkbox
+    ImGui.Checkbox("Console Output", self.temp_settings.console_enabled)
+    if ImGui.IsItemClicked() then
+      self.temp_settings.console_enabled = not self.temp_settings.console_enabled
     end
-
-    local gui_enabled = self.config:get('log_gui_enabled') ~= false
-    local changed, new_gui = ImGui.Checkbox("GUI Output", gui_enabled)
-    if changed then
-      self.config:set('log_gui_enabled', new_gui)
-      if self.smart_logger then
-        self.smart_logger:set_gui_enabled(new_gui)
-      end
-      logger:info("GUI output %s", new_gui and "enabled" or "disabled")
+  
+    -- GUI output checkbox
+    ImGui.Checkbox("GUI Output", self.temp_settings.gui_enabled)
+    if ImGui.IsItemClicked() then
+      self.temp_settings.gui_enabled = not self.temp_settings.gui_enabled
     end
-
+  
     ImGui.Spacing()
-
-    -- Smart routing
-    local smart_routing = self.config:get('log_smart_routing') ~= false
-    local changed, new_smart = ImGui.Checkbox("Smart Routing", smart_routing)
-    if changed then
-      self.config:set('log_smart_routing', new_smart)
-      if self.smart_logger then
-        self.smart_logger:set_smart_routing(new_smart)
-      end
-      logger:info("Smart routing %s", new_smart and "enabled" or "disabled")
+  
+    -- Smart routing checkbox
+    ImGui.Checkbox("Smart Routing", self.temp_settings.smart_routing)
+    if ImGui.IsItemClicked() then
+      self.temp_settings.smart_routing = not self.temp_settings.smart_routing
     end
-
+    
     ImGui.SameLine()
     ImGui.TextDisabled("(?)")
     if ImGui.IsItemHovered() then
       ImGui.BeginTooltip()
       ImGui.PushTextWrapPos(ImGui.GetFontSize() * 35.0)
-      ImGui.Text(
-      "When GUI is open: reduces console spam by sending only high-priority messages (FATAL, ERROR, WARN) to console")
+      ImGui.Text("When GUI is open: reduces console spam by sending only high-priority messages (FATAL, ERROR, WARN) to console")
       ImGui.PopTextWrapPos()
       ImGui.EndTooltip()
     end
-
+  
     ImGui.Spacing()
     ImGui.Separator()
     ImGui.Spacing()
-
-    -- GUI display settings
+  
+    -- === MAX LINES INPUT ===
     ImGui.Text("GUI Display Settings:")
 
-    local changed, max_lines = ImGui.InputInt("Max Lines", self.max_log_lines)
-    if changed and max_lines >= 100 and max_lines <= 5000 then
-      self.max_log_lines = max_lines
-      self.config:set('max_log_lines', max_lines)
+    -- Use local variable
+    self.temp_settings.max_lines = ImGui.InputInt("Max Lines", self.temp_settings.max_lines)
 
-      -- Trim messages if new max is smaller
-      while #self.log_messages > max_lines do
+    -- Validate and update
+    local num = tonumber(self.temp_settings.max_lines)
+    if num then
+      if num < 100 then
+        self.temp_settings.max_lines = 100
+      elseif num > 5000 then
+        self.temp_settings.max_lines = 5000
+      else
+      end
+    end
+    
+    -- === ACTION BUTTONS ===
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.Spacing()
+    
+    ImGui.BeginGroup()
+    
+    -- SAVE button
+    if ImGui.Button("Save Configuration", 120, 0) then
+      -- Save to config
+      self.config:set('log_verbosity', self.temp_settings.verbosity)
+      self.config:set('max_log_lines', self.temp_settings.max_lines)
+      self.config:set('log_console_enabled', self.temp_settings.console_enabled)
+      self.config:set('log_gui_enabled', self.temp_settings.gui_enabled)
+      self.config:set('log_smart_routing', self.temp_settings.smart_routing)
+      self.config:save()
+      
+      -- Apply to logger
+      if self.smart_logger then
+        self.smart_logger:set_verbosity(self.temp_settings.verbosity)
+        self.smart_logger:set_console_enabled(self.temp_settings.console_enabled)
+        self.smart_logger:set_gui_enabled(self.temp_settings.gui_enabled)
+        self.smart_logger:set_smart_routing(self.temp_settings.smart_routing)
+        self.smart_logger:set_max_gui_lines(self.temp_settings.max_lines)
+      end
+      
+      -- Update window
+      self.max_log_lines = self.temp_settings.max_lines
+      while #self.log_messages > self.max_log_lines do
         table.remove(self.log_messages, 1)
       end
-
-      if self.smart_logger then
-        self.smart_logger:set_max_gui_lines(max_lines)
-      end
+      
+      self.logger:info("Log configuration saved and applied")
     end
-
-    -- Save button
-    ImGui.Spacing()
-    if ImGui.Button("Save Configuration") then
-      self.config:save()
-      logger:info("Log configuration saved")
-    end
-
+    
     ImGui.SameLine()
-
-    -- Reload button
-    if ImGui.Button("Reload Configuration") then
-      self.config:load()
-
-      -- Update local state from config
-      self.max_log_lines = self.config:get('max_log_lines') or 500
-      self.log_panel_state.auto_scroll = self.config:get('log_auto_scroll') ~= false
-      self.log_panel_state.show_timestamps = self.config:get('log_show_timestamps') ~= false
-      self.log_panel_state.show_levels = self.config:get('log_show_levels') ~= false
-
-      -- Update smart logger if available
+    
+    -- APPLY button
+    if ImGui.Button("Apply (No Save)", 120, 0) then
+      -- Apply to logger only
       if self.smart_logger then
-        local log_config = self.config:get_log_config()
-        if log_config then
-          self.smart_logger:set_verbosity(log_config.verbosity)
-          self.smart_logger:set_console_enabled(log_config.console_enabled)
-          self.smart_logger:set_gui_enabled(log_config.gui_enabled)
-          self.smart_logger:set_smart_routing(log_config.smart_routing)
-          self.smart_logger:set_max_gui_lines(log_config.max_gui_lines)
-        end
+        self.smart_logger:set_verbosity(self.temp_settings.verbosity)
+        self.smart_logger:set_console_enabled(self.temp_settings.console_enabled)
+        self.smart_logger:set_gui_enabled(self.temp_settings.gui_enabled)
+        self.smart_logger:set_smart_routing(self.temp_settings.smart_routing)
+        self.smart_logger:set_max_gui_lines(self.temp_settings.max_lines)
       end
-
-      logger:info("Log configuration reloaded")
+      
+      -- Update window
+      self.max_log_lines = self.temp_settings.max_lines
+      while #self.log_messages > self.max_log_lines do
+        table.remove(self.log_messages, 1)
+      end
+      
+      self.logger:info("Log configuration applied (not saved to file)")
     end
+    
+    ImGui.SameLine()
+    
+    -- RESET button
+    if ImGui.Button("Reset to Saved", 120, 0) then
+      -- Reload config
+      self.config:load()
+      
+      -- Reset temp settings
+      self.temp_settings = {
+        verbosity = tonumber(self.config:get('log_verbosity')) or 3,
+        max_lines = tonumber(self.config:get('max_log_lines')) or 500,
+        console_enabled = self.config:get('log_console_enabled') ~= false,
+        gui_enabled = self.config:get('log_gui_enabled') ~= false,
+        smart_routing = self.config:get('log_smart_routing') ~= false
+      }
+      
+      -- Apply to logger
+      if self.smart_logger then
+        self.smart_logger:set_verbosity(self.temp_settings.verbosity)
+        self.smart_logger:set_console_enabled(self.temp_settings.console_enabled)
+        self.smart_logger:set_gui_enabled(self.temp_settings.gui_enabled)
+        self.smart_logger:set_smart_routing(self.temp_settings.smart_routing)
+        self.smart_logger:set_max_gui_lines(self.temp_settings.max_lines)
+      end
+      
+      -- Update window
+      self.max_log_lines = self.temp_settings.max_lines
+      
+      self.logger:info("Log configuration reset to saved values")
+    end
+    
+    ImGui.EndGroup()
   end
 
   -- Copy log to clipboard
@@ -510,7 +591,7 @@ function MainWindow.new(state, config, logger, events)
       for _, tab in ipairs(self.tabs) do
         local tab_flags = 0
         if self.active_tab == tab.id then
-          tab_flags = ImGui.TabItemFlags.SetSelected
+          tab_flags = ImGuiTabItemFlags_SetSelected
         end
 
         if ImGui.BeginTabItem(tab.icon .. " " .. tab.name, nil, tab_flags) then
@@ -526,23 +607,32 @@ function MainWindow.new(state, config, logger, events)
   -- Render tab content
   function self:render_tab_content(tab_id)
     ImGui.BeginChild("PanelContent", 0, 0, true)
-
-    if tab_id == 1 then
-      -- Log Panel
-      self:render_log_panel()
-    elseif tab_id == 2 then
-      -- Settings Panel (existing)
-      ImGui.Text("Settings Panel - Coming in Phase 3")
-      ImGui.Text("Character and system settings")
-    elseif tab_id == 3 then
-      -- Loot Rules Panel (existing)
-      ImGui.Text("Loot Rules Panel - Coming in Phase 4")
-      ImGui.Text("Manage item loot rules")
-    elseif tab_id == 4 then
-      -- Log Settings Panel (new)
-      self:render_log_settings_panel()
+    
+    -- Use pcall to catch errors and ensure EndChild is called
+    local success, error_msg = pcall(function()
+      if tab_id == 1 then
+        -- Log Panel
+        self:render_log_panel()
+      elseif tab_id == 2 then
+        -- Settings Panel (existing)
+        ImGui.Text("Settings Panel - Coming in Phase 3")
+        ImGui.Text("Character and system settings")
+      elseif tab_id == 3 then
+        -- Loot Rules Panel (existing)
+        ImGui.Text("Loot Rules Panel - Coming in Phase 4")
+        ImGui.Text("Manage item loot rules")
+      elseif tab_id == 4 then
+        -- Log Settings Panel (new)
+        self:render_log_settings_panel()
+      end
+    end)
+    
+    if not success then
+      -- Use simple print to avoid recursive logger errors
+      print(string.format("[GUI ERROR] Error rendering tab %d: %s", tab_id, tostring(error_msg)))
+      ImGui.TextColored(1.0, 0.0, 0.0, 1.0, "ERROR: " .. tostring(error_msg))
     end
-
+    
     ImGui.EndChild()
   end
 

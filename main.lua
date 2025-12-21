@@ -20,9 +20,9 @@ function Main.new()
   }
 
   -- Core systems (always loaded)
-  self.events = require('core.events').new(nil) -- Logger will be injected later
-  self.state = require('core.state').new()
-  self.config = require('core.config').new(nil) -- Logger will be injected later
+  self.events = require('core\\events').new(nil) -- Logger will be injected later
+  self.state = require('core\\state').new()
+  self.config = require('core\\config').new(nil) -- Logger will be injected later
 
   -- Initialize logger with events and config
   local log_config = self.config:get_log_config() or {
@@ -33,11 +33,13 @@ function Main.new()
     max_gui_lines = 500
   }
 
-  self.logger = require('core.logger').new(self.events, log_config)
+  self.logger = require('core\\logger').new(self.events, log_config)
 
   -- Now inject logger into events and config
   self.events.logger = self.logger
   self.config.logger = self.logger
+
+  self.events:register_mq_events()
 
   function self:init()
     self.logger:log_startup()
@@ -63,22 +65,26 @@ function Main.new()
     self.services.loot = require('services.lootservice').new(self.state, self.config, self.logger, self.events,
       self.services.items)
 
-    -- Initialize GUI Manager (FIXED: Only 3 arguments)
+    self.logger:info("Attempting to initialize GUI Manager")
+    -- Initialize GUI Manager
     local success, gui = pcall(require, 'gui.manager')
     if success then
       self.services.gui = gui.new(self.state, self.config, self.logger)
-      self.logger:debug("GUI Manager initialized")
-
-      -- Pass events to GUI manager if it supports it
-      if self.services.gui.set_events then
-        self.services.gui:set_events(self.events)
-      end
-
-      -- Register smart logger with GUI main window
-      if self.services.gui.windows and self.services.gui.windows.main then
-        if self.services.gui.windows.main.register_smart_logger then
-          self.services.gui.windows.main:register_smart_logger(self.logger)
+        self.logger:debug("GUI Manager initialized")
+        
+        -- Pass events to GUI manager if it supports it
+        if self.services.gui.set_events then
+          self.services.gui:set_events(self.events)
         end
+        
+        -- Initialize the GUI (so windows are created)
+        self.services.gui:init()
+        
+        -- NOW register smart logger with GUI main window
+        if self.services.gui.windows and self.services.gui.windows.main then
+          if self.services.gui.windows.main.register_smart_logger then
+            self.services.gui.windows.main:register_smart_logger(self.logger)
+          end
       end
     else
       self.logger:warn("GUI not available: %s", gui)

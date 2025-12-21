@@ -58,8 +58,8 @@ function Events.new(logger)
       self.logger:debug("MQ events already registered")
       return
     end
-
-    self.logger:debug("Registering MQ events")
+    
+    self.logger:debug("Starting MQ event registration")    
 
     -- Loot completion events
     mq.event("ItemLooted", "#*#You have looted a #*#", function()
@@ -220,9 +220,6 @@ function Events.new(logger)
   function self:get_event_types()
     return self.EVENT_TYPES
   end
-
-  -- Register MQ events on creation
-  self:register_mq_events()
 
   return self
 end
