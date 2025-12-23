@@ -1,229 +1,219 @@
---[[
-DESIGN DECISION: Configuration as a service with validation
-WHY: Separates config loading from config usage
-     Type validation and default values
-     Hot-reload capability (future)
---]]
-
+-- config.lua - Configuration system using db.lua
 local mq = require('mq')
+local DB = require('core.db')
 
 local Config = {}
+Config.__index = Config
 
 function Config.new(logger)
-  local self = {
-    logger = logger,
-    ini_file = mq.configDir .. "\\Loot.ini",
+    local self = setmetatable({}, Config)
+    self.logger = logger
+    self.db = DB.new(logger)
+    self.ini_file = mq.configDir .. "\\Loot.ini"
+    self.conversion_done = false
 
-    -- Default settings structure (EXPANDED with log settings)
-    settings = {
-      -- Existing settings
-      alpha_mode = false,
-      loot_check_delay = 2000,
-      debug_logging = false,
-      auto_open_window = true,
-      no_drop_wait_time = 300,
-      enable_file_logging = false,
-      log_file_path = "logs/LuaLooter.log",
-      max_log_size_mb = 10,
+    -- Default settings
+    self.defaults = {
+        -- Logging
+        log_verbosity = 3,
+        max_log_lines = 500,
+        log_auto_scroll = true,
+        log_show_timestamps = true,
+        log_show_levels = true,
+        log_console_enabled = true,
+        log_gui_enabled = true,
+        log_smart_routing = true,
 
-      -- NEW: Logging configuration
-      log_verbosity = 3,                -- Default INFO level
-      log_console_enabled = true,       -- Output to MQ console
-      log_gui_enabled = true,           -- Output to GUI log panel
-      log_smart_routing = true,         -- Reduce console spam when GUI open
-      max_log_lines = 500,              -- Max lines in GUI log panel
-      log_auto_scroll = true,           -- Auto-scroll to bottom
-      log_show_timestamps = true,       -- Show timestamps in GUI
-      log_show_levels = true            -- Show level names in GUI
-    },
+        -- Loot
+        loot_enabled = true,
+        loot_delay = 1000,
+        loot_check_delay = 2000,
+        auto_open_window = true,
+        no_drop_wait_time = 300,
+        enable_file_logging = false,
+        log_file_path = "logs/LuaLooter.log",
+        max_log_size_mb = 10,
 
-    char_settings = {
-      MasterLoot = true,
-      LootFromGeneralSection = true,
-      LootValue = 1000,
-      LootTrash = false,
-      LootPersonalOnly = false,
-      AlwaysLootTradeskills = true,
-      SaveSlots = 3,
-      AutoLootCash = true,
-      AutoLootQuest = true,
-      AutoLootCollectible = true,
-      QuestLootValue = 500,
+        -- Character defaults
+        master_loot = true,
+        loot_from_general_section = true,
+        loot_value = 1000,
+        loot_trash = false,
+        loot_personal_only = false,
+        always_loot_tradeskills = true,
+        save_slots = 3,
+        auto_loot_cash = true,
+        auto_loot_quest = true,
+        auto_loot_collectible = true,
+        quest_loot_value = 500,
     }
-  }
 
-  -- Helper functions (KEEP EXISTING)
-  local function to_bool(val)
-    if type(val) == 'boolean' then return val end
-    if type(val) == 'number' then return val ~= 0 end
-    if type(val) == 'string' then
-      local lower = string.lower(val)
-      return lower == 'true' or lower == '1' or lower == 'yes'
-    end
-    return false
-  end
-
-  local function clean_numeric(val, default)
-    if type(val) == 'string' then
-      local lower = string.lower(val)
-      if lower == 'nil' or lower == 'null' or lower == '' then
-        return default
-      end
-    end
-    return tonumber(val) or default
-  end
-
-  -- Helper to safely get INI value
-  local function get_ini_value(ini_file, section, key, default)
-    local value = mq.TLO.Ini(ini_file, section, key, default)()
-
-    -- Handle "NULL" string that MQ returns for missing entries
-    if value and type(value) == 'string' and string.lower(value) == 'null' then
-      return default
+    -- ==================== HELPERS ====================
+    local function to_bool(val)
+        if type(val) == 'boolean' then return val end
+        if type(val) == 'number' then return val ~= 0 end
+        if type(val) == 'string' then
+            local lower = val:lower()
+            return lower == 'true' or lower == '1' or lower == 'yes' or lower == 'on'
+        end
+        return false
     end
 
-    return value
-  end
-
-  -- Helper to safely set INI value
-  local function set_ini_value(ini_file, section, key, value)
-    -- Escape quotes in the value
-    local safe_value = tostring(value):gsub('"', '\\"')
-
-    -- Use MQ's /ini command
-    mq.cmdf('/ini "%s" "%s" "%s" "%s"',
-      ini_file,
-      section,
-      key,
-      safe_value)
-
-    return true
-  end
-
-  -- COMPLETE load function (with ALL settings)
-  function self:load()
-    self.logger:info("Loading configuration from: %s", self.ini_file)
-
-    local char_name = mq.TLO.Me.Name()
-
-    -- Load Settings section (EXISTING + LOG SETTINGS)
-    for key, default_val in pairs(self.settings) do
-      -- Determine which INI section this setting belongs to
-      local section = "Settings"
-
-      -- Log settings go to LogSettings section
-      if key:find("^log_") or key == "max_log_lines" then
-        section = "LogSettings"
-      end
-
-      local value = get_ini_value(self.ini_file, section, key, default_val)
-
-      -- Convert boolean strings
-      if type(default_val) == 'boolean' then
-        value = to_bool(value)
-      end
-
-      -- Convert numeric strings
-      if type(default_val) == 'number' then
-        value = clean_numeric(value, default_val)
-      end
-
-      self.settings[key] = value
-
-      self.logger:debug("Loaded setting [%s] %s = %s", section, key, tostring(value))
+    local function clean_numeric(val, default)
+        if type(val) == 'string' then
+            local lower = val:lower()
+            if lower == 'nil' or lower == 'null' or lower == '' then
+                return default
+            end
+        end
+        return tonumber(val) or default
     end
 
-    -- Load character-specific settings (UNCHANGED)
-    for key, default_val in pairs(self.char_settings) do
-      local value = get_ini_value(self.ini_file, char_name, key, default_val)
+    local function parse_ini_file(filename)
+        local config = {}
+        local current_section = nil
+        local file = io.open(filename, "r")
+        if not file then return config end
 
-      -- Convert boolean strings
-      if type(default_val) == 'boolean' then
-        value = to_bool(value)
-      end
-
-      -- Convert numeric strings
-      if type(default_val) == 'number' then
-        value = clean_numeric(value, default_val)
-      end
-
-      self.char_settings[key] = value
-      self.logger:debug("Loaded char setting [%s] %s = %s", char_name, key, tostring(value))
-    end
-
-    self.logger:info("Configuration loaded successfully")
-    self.logger:info("Log verbosity: %d", self.settings.log_verbosity)
-  end
-
-  -- COMPLETE save function
-  function self:save()
-    local char_name = mq.TLO.Me.Name()
-
-    -- Use pcall for safe file operations
-    local save_func = function()
-      -- Save Settings section (existing settings)
-      for key, value in pairs(self.settings) do
-        -- Determine which INI section this setting belongs to
-        local section = "Settings"
-
-        -- Log settings go to LogSettings section
-        if key:find("^log_") or key == "max_log_lines" then
-          section = "LogSettings"
+        for line in file:lines() do
+            line = line:match("^%s*(.-)%s*$")
+            if line ~= "" and not line:match("^[;#]") then
+                local section = line:match("^%[([^%]]+)%]$")
+                if section then
+                    current_section = section
+                    config[current_section] = {}
+                elseif current_section then
+                    local key, value = line:match("^([^=]+)=(.*)$")
+                    if key and value then
+                        key = key:match("^%s*(.-)%s*$")
+                        value = value:match("^%s*(.-)%s*$")
+                        if value:match('^".*"$') then
+                            value = value:sub(2, -2)
+                        end
+                        config[current_section][key] = value
+                    end
+                end
+            end
         end
 
-        set_ini_value(self.ini_file, section, key, value)
-        self.logger:debug("Saved setting [%s] %s = %s", section, key, tostring(value))
-      end
-
-      -- Save character-specific settings
-      for key, value in pairs(self.char_settings) do
-        set_ini_value(self.ini_file, char_name, key, value)
-        self.logger:debug("Saved char setting [%s] %s = %s", char_name, key, tostring(value))
-      end
-
-      self.logger:info("Configuration saved to: %s", self.ini_file)
-      return true
+        file:close()
+        return config
     end
 
-    local success, err = pcall(save_func)
-    if not success then
-      self.logger:error("Failed to save configuration: %s", err)
-      return false
+    -- ==================== API ====================
+
+    function self:init()
+        if not self.db:init() then return false end
+        self.logger:info("Config system ready")
+        return true
     end
 
-    return true
-  end
+    function self:load() return self:init() end
+    function self:save() return true end -- SQLite auto-saves
 
-  function self:get(setting)
-    return self.settings[setting]
-  end
+    function self:get(key, default_value)
+        default_value = default_value or self.defaults[key]
+        if not self.conversion_done then return default_value end
+        return self.db:get_setting(key, default_value)
+    end
 
-  function self:get_char(setting)
-    return self.char_settings[setting]
-  end
+    function self:get_char(key, default_value)
+        local char_name = mq.TLO.Me.Name()
+        return self.db:get_char_setting(char_name, key, default_value)
+    end
 
-  function self:set(setting, value)
-    self.settings[setting] = value
+    function self:set(key, value)
+        local category = "general"
+        if key:find("^log_") then category = "log"
+        elseif key:find("^loot_") then category = "loot" end
+        self.db:set_setting(key, value, category)
+        return self
+    end
+
+    function self:set_char(key, value)
+        local char_name = mq.TLO.Me.Name()
+        self.db:set_char_setting(char_name, key, value)
+        return self
+    end
+
+    function self:get_log_config()
+        return {
+            verbosity = self:get('log_verbosity', 3),
+            console_enabled = self:get('log_console_enabled', true),
+            gui_enabled = self:get('log_gui_enabled', true),
+            smart_routing = self:get('log_smart_routing', true),
+            max_gui_lines = self:get('max_log_lines', 500)
+        }
+    end
+
+    -- Conversion function, called once via GUI
+    function self:convert_from_ini()
+        if self.conversion_done then
+            return false, "Conversion already completed"
+        end
+
+        local file = io.open(self.ini_file, "r")
+        if not file then
+            return false, "Loot.ini file not found"
+        end
+        file:close()
+
+        local ini_data = parse_ini_file(self.ini_file)
+        if not ini_data or not next(ini_data) then
+            return false, "Loot.ini is empty or invalid"
+        end
+
+        local imported_count = 0
+        local errors = {}
+
+        self.db:begin_transaction()
+
+        -- Convert [Settings] section
+        if ini_data["Settings"] then
+            for key, value in pairs(ini_data["Settings"]) do
+                local success, err = self.db:import_setting(key, value, "general")
+                if success then imported_count = imported_count + 1
+                else table.insert(errors, string.format("Settings.%s: %s", key, err)) end
+            end
+        end
+
+        -- Convert [LogSettings] section
+        if ini_data["LogSettings"] then
+            for key, value in pairs(ini_data["LogSettings"]) do
+                local success, err = self.db:import_setting(key, value, "log")
+                if success then imported_count = imported_count + 1
+                else table.insert(errors, string.format("LogSettings.%s: %s", key, err)) end
+            end
+        end
+
+        -- Convert character-specific section
+        local char_name = mq.TLO.Me.Name()
+        if ini_data[char_name] then
+            for key, value in pairs(ini_data[char_name]) do
+                local success, err = self.db:import_char_setting(char_name, key, value)
+                if success then imported_count = imported_count + 1
+                else table.insert(errors, string.format("%s.%s: %s", char_name, key, err)) end
+            end
+        end
+
+        self.db:commit_transaction()
+        self.conversion_done = true
+
+        if #errors > 0 then
+            self.logger:warn("Conversion completed with %d errors", #errors)
+            for _, err in ipairs(errors) do
+                self.logger:warn("  %s", err)
+            end
+        end
+
+        return true, string.format("Converted %d settings successfully", imported_count)
+    end
+
+    function self:get_conversion_status()
+        return self.db:get_conversion_status(self.ini_file)
+    end
+
     return self
-  end
-
-  function self:set_char(setting, value)
-    self.char_settings[setting] = value
-    return self
-  end
-
-  -- NEW: Get log configuration for SmartLogger
-  function self:get_log_config()
-    return {
-      verbosity = self.settings.log_verbosity,
-      console_enabled = self.settings.log_console_enabled,
-      gui_enabled = self.settings.log_gui_enabled,
-      smart_routing = self.settings.log_smart_routing,
-      max_gui_lines = self.settings.max_log_lines
-    }
-  end
-
-  return self
 end
 
 return Config

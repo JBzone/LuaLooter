@@ -87,6 +87,19 @@ function MainWindow.new(state, config, logger, events)
 
   -- Helper to capture log messages WITH FORMATTING and table handling
   local function capture_log(level, ...)
+    local verbosity = self.config:get('log_verbosity')
+    if verbosity == nil then
+      print("ERROR: self.config:get('log_verbosity') returned nil")
+      verbosity = 3  -- Default to INFO
+    end
+
+    -- Now use verbosity for comparison
+    local level_num = self.logger:get_verbosity_num(level) or 3
+    
+    if level_num > verbosity then  -- Use the retrieved verbosity
+      return
+    end
+  
     local args = { ... }
     local format_str = args[1]
     local msg_str
@@ -194,7 +207,22 @@ function MainWindow.new(state, config, logger, events)
         text = text
     }
     
-    table.insert(self.log_messages, entry)
+    local verbosity = self.config:get('log_verbosity')
+    if verbosity == nil then
+      print("ERROR: self.config:get('log_verbosity') returned nil")
+      verbosity = 3  -- Default to INFO
+    end
+
+    -- Now use verbosity for comparison
+    local level_num = self.logger:get_verbosity_num(level) or 3
+    
+    if level_num <= verbosity then
+      table.insert(self.log_messages, entry)
+    end
+
+    if level_num<=self.config:get('log_verbosity') then
+      table.insert(self.log_messages, entry)
+    end
     
     -- Trim if too many messages
     while #self.log_messages > self.max_log_lines do
@@ -412,7 +440,7 @@ function MainWindow.new(state, config, logger, events)
       else
       end
     end
-    
+
     -- === ACTION BUTTONS ===
     ImGui.Spacing()
     ImGui.Separator()
