@@ -1,5 +1,4 @@
--- core/events.lua
-
+-- core/events.lua - FIXED VERSION (SAME API)
 local mq = require('mq')
 
 local Events = {}
@@ -52,14 +51,35 @@ function Events.new(logger)
     mq_events_registered = false
   }
 
+  -- SAFE logging helper (internal use only)
+  local function safe_log(self, level, msg, ...)
+    if self.logger and self.logger[level] then
+      local ok, err = pcall(self.logger[level], self.logger, msg, ...)
+      if not ok then
+        -- Fallback to console
+        print(string.format("[Events] Logger error: %s", err))
+      end
+    elseif level == "error" or level == "warn" then
+      -- Console fallback for important messages
+      local formatted = string.format("[Events] " .. msg, ...)
+      if level == "error" then
+        print("\ar" .. formatted .. "\ax")
+      elseif level == "warn" then
+        print("\ay" .. formatted .. "\ax")
+      else
+        print(formatted)
+      end
+    end
+  end
+
   -- Register ALL MQ events in ONE PLACE
   function self:register_mq_events()
     if self.mq_events_registered then
-      self.logger:debug("MQ events already registered")
+      safe_log(self, "debug", "MQ events already registered")
       return
     end
     
-    self.logger:debug("Starting MQ event registration")    
+    safe_log(self, "debug", "Starting MQ event registration")    
 
     -- Loot completion events
     mq.event("ItemLooted", "#*#You have looted a #*#", function()
@@ -140,7 +160,7 @@ function Events.new(logger)
     end)
 
     self.mq_events_registered = true
-    self.logger:info("MQ events registered successfully")
+    safe_log(self, "info", "MQ events registered successfully")
   end
 
   function self:publish(event_type, data)
@@ -153,11 +173,7 @@ function Events.new(logger)
       for _, callback in ipairs(subscribers) do
         local success, err = pcall(callback, data)
         if not success then
-          if self.logger then
-            self.logger:error("Callback error for %s: %s", event_type, err)
-          else
-            print(string.format("[Events] Callback error for %s: %s", event_type, err))
-          end
+          safe_log(self, "error", "Callback error for %s: %s", event_type, err)
         end
       end
     end
@@ -168,18 +184,12 @@ function Events.new(logger)
       for _, callback in ipairs(all_subscribers) do
         local success, err = pcall(callback, data)
         if not success then
-          if self.logger then
-            self.logger:error("Global callback error: %s", err)
-          else
-            print(string.format("[Events] Global callback error: %s", err))
-          end
+          safe_log(self, "error", "Global callback error: %s", err)
         end
       end
     end
 
-    if self.logger then
-      self.logger:debug("Event published: %s", event_type)
-    end
+    safe_log(self, "debug", "Event published: %s", event_type)
 
     return self
   end
@@ -190,9 +200,7 @@ function Events.new(logger)
     end
     table.insert(self.subscribers[event_type], callback)
 
-    if self.logger then
-      self.logger:debug("Subscribed to event: %s", event_type)
-    end
+    safe_log(self, "debug", "Subscribed to event: %s", event_type)
 
     return self
   end
@@ -207,9 +215,7 @@ function Events.new(logger)
     for i, cb in ipairs(self.subscribers[event_type]) do
       if cb == callback then
         table.remove(self.subscribers[event_type], i)
-        if self.logger then
-          self.logger:debug("Unsubscribed from event: %s", event_type)
-        end
+        safe_log(self, "debug", "Unsubscribed from event: %s", event_type)
         break
       end
     end

@@ -68,7 +68,6 @@ function Logger.new(events, config)
     end
 
     -- ===== FUTURE-PROOF BOUNDARY FUNCTIONS =====
-    -- SINGLE SOURCE OF TRUTH for verbosity boundaries
     function self:get_min_verbosity()
         return 0  -- FATAL - Change here affects entire system
     end
@@ -122,12 +121,15 @@ function Logger.new(events, config)
     end
 
     function self:get_config_value(key, default)
-        if not self.config_object then return default end
-        if self.config_object.get then
-            local val = self.config_object:get(key)
-            if val ~= nil then return val end
-        end
-        return self.config_object[key] or default
+      -- Config is guaranteed to be initialized before logger is created
+      if not self.config_object then return default end
+      
+      if self.config_object.get then
+          local val = self.config_object:get(key)
+          if val ~= nil then return val end
+      end
+      
+      return default
     end
 
     function self:format_message(level, msg, ...)
@@ -203,15 +205,18 @@ function Logger.new(events, config)
 
     -- ===== CORE LOGGING =====
     function self:log(level, msg, ...)
-        local level_num = self:get_verbosity_num(level)
-        if level_num > self:get_config_value('log_verbosity', 3) then
-            self.stats.messages_filtered = self.stats.messages_filtered + 1
-            return self
-        end
-        local formatted = self:format_message(level, msg, ...)
-        self:route_message(formatted, level)
-        self:write_to_file(formatted.file_msg)
+      local level_num = self:get_verbosity_num(level)
+      local verbosity_setting = self:get_config_value('log_verbosity', 3)
+      -- FIX: Convert to number if it's a string
+      local verbosity = tonumber(verbosity_setting) or 3
+      if level_num > verbosity then
+        self.stats.messages_filtered = self.stats.messages_filtered + 1
         return self
+      end
+      local formatted = self:format_message(level, msg, ...)
+      self:route_message(formatted, level)
+      self:write_to_file(formatted.file_msg)
+      return self
     end
 
     -- Convenience methods
@@ -222,30 +227,40 @@ function Logger.new(events, config)
     function self:fatal(...) return self:log("FATAL", ...) end
     function self:trace(...) return self:log("TRACE", ...) end
 
-    -- ===== CONFIGURATION METHODS =====
+    -- ===== CONFIGURATION SETTERS (Call config:set) =====
     function self:set_level(level)
         local level_num = self:get_verbosity_num(level)
-        self.config_object:set('log_verbosity', level_num)
+        if self.config_object and self.config_object.set then
+            self.config_object:set('log_verbosity', level_num)
+        end
         return self
     end
 
     function self:set_console_enabled(val)
-        self.config_object:set('log_console_enabled', val)
+        if self.config_object and self.config_object.set then
+            self.config_object:set('log_console_enabled', val)
+        end
         return self
     end
 
     function self:set_gui_enabled(val)
-        self.config_object:set('log_gui_enabled', val)
+        if self.config_object and self.config_object.set then
+            self.config_object:set('log_gui_enabled', val)
+        end
         return self
     end
 
     function self:set_smart_routing(val)
-        self.config_object:set('log_smart_routing', val)
+        if self.config_object and self.config_object.set then
+            self.config_object:set('log_smart_routing', val)
+        end
         return self
     end
 
     function self:set_max_gui_lines(val)
-        self.config_object:set('max_log_lines', val)
+        if self.config_object and self.config_object.set then
+            self.config_object:set('max_log_lines', val)
+        end
         return self
     end
 

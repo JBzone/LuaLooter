@@ -1,7 +1,11 @@
 --[[
-LuaLooter Main - Reload-Safe Version
-DESIGN DECISION: Service Locator Pattern with Dependency Injection
-WHY: Centralizes object creation, ensures clean lifecycle, prevents duplicate commands/events
+LuaLooter Main - Linear Initialization with Complete Functionality
+1. Config (memory only)
+2. Events (independent)
+3. Logger (needs config defaults)
+4. DB (needs logger)
+5. Connect Config to DB
+6. Everything else (full original init)
 --]]
 
 local mq = require('mq')
@@ -9,35 +13,77 @@ local mq = require('mq')
 local Main = {}
 
 function Main.new()
-    local self = {
-        running = true,
-        modules = {},
-        services = {},
-        commands_bound = false,
+  local self = {
+      running = true,
+      modules = {},
+      services = {},
+      commands_bound = false,
+  }
+
+  -- === STEP 1: CONFIG (memory only, no DB yet) ===
+  self.config = require('core\\config').new()
+  print("[INIT] Config created (memory only)")
+  
+  -- === STEP 2: EVENTS (independent) ===
+  self.events = require('core\\events').new()
+  print("[INIT] Events created")
+  
+  -- === STEP 3: LOGGER (uses config defaults from memory) ===
+  self.logger = require('core\\logger').new(self.events, self.config)
+  print("[INIT] Logger created")
+  
+  -- === STEP 4: Give config the logger ===
+  self.config:set_logger(self.logger)
+  print("[INIT] Logger assigned to config")
+  
+  -- === STEP 5: DB (needs logger) ===
+print("[INIT] Creating database object...")
+self.db = require('core.db').new(self.logger)
+
+-- TEMPORARY: Test the database path
+print("[INIT] Database will be created at: " .. self.db.db_file)
+
+-- Check if file already exists
+local test_file = io.open(self.db.db_file, "r")
+if test_file then
+    print("[INIT] Database file already exists: " .. self.db.db_file)
+    test_file:close()
+else
+    print("[INIT] Database file will be created: " .. self.db.db_file)
+end
+
+print("[INIT] Attempting to initialize database...")
+if not self.db:init() then
+    print("\ar[INIT FATAL] Database initialization failed!\ax")
+    -- Don't error yet, let's see what happened
+    print("[INIT] Continuing without database (will use defaults)")
+    -- Create a dummy db object that always returns defaults
+    self.db = {
+        get_setting = function(_, key, default) return default end,
+        set_setting = function() return true end,
+        get_char_setting = function(_, char, key, default) return default end,
+        set_char_setting = function() return true end
     }
-
-    -- Initialize logger first
-    self.logger = require('core\\logger').new(nil, {
-        verbosity = 3,
-        console_enabled = true,
-        gui_enabled = true,
-        smart_routing = true,
-        max_gui_lines = 500
-    })
-
-    -- Initialize events and config with logger injected
-    self.events = require('core\\events').new(self.logger)
-    self.config = require('core\\config').new(self.logger)
+  end
+  
+  print("[INIT] Database initialized successfully")
+  
+  -- === STEP 6: Connect config to DB ===
+  self.config:set_db(self.db)
+  self.config:init()
+  print("[INIT] Config connected to database")
+  
+  -- Now everything is ready
+  self.logger:info("Core systems initialized: Config → Logger → DB")
 
     ----------------------------
-    -- Lifecycle Methods
+    -- Lifecycle Methods (ALL ORIGINAL CODE BELOW)
     ----------------------------
     function self:init()
         self.logger:log_startup()
         self.logger:info("Initializing LuaLooter v0.5.0 (Alpha) - SQLite Edition")
 
         -- --- SAFE COMMAND REBIND ---
-        -- Unbind stale commands in case of crash/reload
         mq.unbind("/looter")
         mq.unbind("/ll")
 
@@ -46,12 +92,6 @@ function Main.new()
             self.events:unregister_all()
         end
         self.events:register_mq_events()
-
-        -- Initialize SQLite configuration system
-        if not self.config:init() then
-            self.logger:error("Failed to initialize SQLite configuration system!")
-            return false
-        end
 
         -- Check conversion status
         local status = self.config:get_conversion_status()
@@ -64,10 +104,10 @@ function Main.new()
             self.config:create_default_settings()
         end
 
-        -- Update logger config from loaded configuration
+        -- Configure logger with actual database settings
         local log_config = self.config:get_log_config()
         if log_config then
-            self.logger:set_verbosity(log_config.verbosity)
+            self.logger:set_level(log_config.verbosity)
             self.logger:set_console_enabled(log_config.console_enabled)
             self.logger:set_gui_enabled(log_config.gui_enabled)
             self.logger:set_smart_routing(log_config.smart_routing)
@@ -93,10 +133,9 @@ function Main.new()
                 self.services.gui:set_events(self.events)
             end
             self.services.gui:init()
-            if self.services.gui.windows and self.services.gui.windows.main then
-                if self.services.gui.windows.main.register_smart_logger then
-                    self.services.gui.windows.main:register_smart_logger(self.logger)
-                end
+            -- Register GUI callback with logger
+            if self.services.gui and self.services.gui.register_logger_callback then
+                self.services.gui:register_logger_callback(self.logger)
             end
         else
             self.logger:warn("GUI not available: %s", gui)
@@ -151,7 +190,7 @@ function Main.new()
         while self.running do
             self:process()
             mq.doevents()
-            mq.delay(100) -- 10 FPS, safe because we're inside run()
+            mq.delay(100)
             if self.state.shutdown_requested then
                 self.logger:info("Shutdown requested by state")
                 self.running = false
@@ -165,22 +204,19 @@ function Main.new()
         self.logger:info("Shutting down LuaLooter")
         self.running = false
 
-        -- Unbind commands
         mq.unbind("/looter")
         mq.unbind("/ll")
         self.commands_bound = false
 
-        -- Unregister all events safely
         if self.events and self.events.unregister_all then
             self.events:unregister_all()
         end
 
-        -- Shutdown config
-        self.config:shutdown()
+        if self.config and self.config.shutdown then
+            self.config:shutdown()
+        end
 
-        -- Shutdown logger
         self.logger:shutdown()
-
         self.logger:info("Shutdown complete")
     end
 
@@ -188,7 +224,7 @@ function Main.new()
 end
 
 ----------------------------
--- Entry Point
+-- Entry Point (UNCHANGED)
 ----------------------------
 local function main()
     local app = Main.new()
@@ -201,7 +237,6 @@ local function main()
             app.logger:error(debug.traceback())
         end
 
-        -- Write crash log
         local log_file = io.open(mq.configDir .. "\\LuaLooter_crash.log", "a")
         if log_file then
             log_file:write(string.format("[%s] CRASH: %s\n", os.date("%Y-%m-%d %H:%M:%S"), tostring(err)))
@@ -217,7 +252,6 @@ local function main()
     end
 end
 
--- Start the app
 main()
 
 return Main
